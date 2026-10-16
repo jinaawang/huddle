@@ -448,18 +448,18 @@ function timedColumn(day, occs, compact) {
     const { L, sub } = blockHtml(it.o, compact);
     return `<button type="button" class="blk c-${L.color}${L.busy ? ' busy' : ''}${L.pending ? ' pending' : ''}"
       style="top:${top}px;height:${h}px;left:calc(${l}% + 1px);width:calc(${w}% - 3px)"
-      data-action="open-event" data-id="${it.o.ev.id}" data-start="${it.o.start.toISOString()}"
+      data-action="open-event" data-id="${it.o.ev.id}" data-start="${it.o.start.toISOString()}"${it.o.ev.is_mine ? ' data-drag="1"' : ''}
       aria-label="${esc(L.title)}, ${esc(fmtRange(it.o.start, it.o.end))}">
       <span class="t">${esc(L.title)}</span>${!compact && h >= 38 ? `<span class="s">${sub}</span>` : ''}${!compact && h >= 56 ? `<span class="s">${esc(fmtRange(it.o.start, it.o.end))}</span>` : ''}
     </button>`;
   }).join('');
   const now = new Date();
   const nowLine = sameDay(day, now) ? `<div class="now-line" style="top:${((now - ds) / HOUR) * 48}px" aria-label="Now, ${fmtTime(now)}"></div>` : '';
-  return `<div class="col${compact && sameDay(day, now) ? ' today' : ''}">${blocks}${nowLine}</div>`;
+  return `<div class="col${compact && sameDay(day, now) ? ' today' : ''}" data-col="${dayKey(day)}">${blocks}${nowLine}</div>`;
 }
 function chipHtml(o, compact) {
   const L = look(o.ev);
-  return `<button type="button" class="chip c-${L.color}${L.busy ? ' busy' : ''}${L.pending ? ' pending' : ''}" data-action="open-event" data-id="${o.ev.id}" data-start="${o.start.toISOString()}">
+  return `<button type="button" class="chip c-${L.color}${L.busy ? ' busy' : ''}${L.pending ? ' pending' : ''}" data-action="open-event" data-id="${o.ev.id}" data-start="${o.start.toISOString()}"${o.ev.is_mine ? ' data-drag="1"' : ''}>
     ${compact ? '' : icon(o.ev.kind === 'reminder' ? 'bell' : 'calendar', 'sm')}<span class="grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(L.title)}</span>${compact ? '' : `<span class="s">${o.ev.all_day ? 'All day' : esc(fmtTime(o.start))}</span>`}
   </button>`;
 }
@@ -694,7 +694,9 @@ function renderSheet() {
   else if (sheet.type === 'group') inner = groupSheet();
   else if (sheet.type === 'new-group') inner = newGroupSheet();
   else if (sheet.type === 'me') inner = meSheet();
-  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="backdrop"><div class="sheet${sheet.type === 'editor' ? ' full' : ''}" role="dialog" aria-modal="true" aria-label="${esc(sheet.label || '')}">${inner}</div></div>`;
+  const enter = !$sheet.firstElementChild || $sheet.dataset.type !== sheet.type;
+  $sheet.dataset.type = sheet.type;
+  $sheet.innerHTML = `<div class="sheet-backdrop" data-action="backdrop"><div class="sheet${sheet.type === 'editor' ? ' full' : ''}${enter ? ' enter' : ''}" role="dialog" aria-modal="true" aria-label="${esc(sheet.label || '')}">${inner}</div></div>`;
   document.body.style.overflow = 'hidden';
   const el = $sheet.querySelector('.sheet');
   if (keep) el.scrollTop = keep;
@@ -722,7 +724,10 @@ function eventSheet() {
   const end = new Date(start.getTime() + (new Date(ev.ends_at) - new Date(ev.starts_at)));
   const L = look(ev);
   const rows = [];
-  rows.push(`<div class="list-row">${icon('clock')}<span class="grow">${fmtDate(start)}<br><span class="label muted">${esc(fmtRange(start, end, ev.all_day))}</span></span></div>`);
+  const lastDay = addDays(sod(end), -1);
+  rows.push(ev.all_day && lastDay > start
+    ? `<div class="list-row">${icon('clock')}<span class="grow">${fmtDate(start)} – ${fmtDate(lastDay)}<br><span class="label muted">All day</span></span></div>`
+    : `<div class="list-row">${icon('clock')}<span class="grow">${fmtDate(start)}<br><span class="label muted">${esc(fmtRange(start, end, ev.all_day))}</span></span></div>`);
   if (ev.repeat && ev.repeat !== 'none') rows.push(`<div class="list-row">${icon('repeat')}<span class="grow">${REPEAT_LABEL[ev.repeat]}</span></div>`);
   if (ev.location) rows.push(`<div class="list-row">${icon('pin')}<span class="grow">${esc(ev.location)}</span></div>`);
   if (ev.notes) rows.push(`<div class="list-row">${icon('note')}<span class="grow" style="white-space:pre-wrap">${esc(ev.notes)}</span></div>`);
@@ -758,7 +763,7 @@ function newDraft(over = {}) {
   start.setMinutes(0, 0, 0);
   const end = new Date(start.getTime() + HOUR);
   return {
-    id: null, kind: 'event', reminder_type: 'birthday', title: '', date: dayKey(start), start: timeKey(start), end: timeKey(end),
+    id: null, kind: 'event', reminder_type: 'birthday', title: '', date: dayKey(start), start: timeKey(start), endDate: dayKey(end), end: timeKey(end),
     all_day: false, repeat: 'none', location: '', notes: '', is_private: true, groups: [], detail: 'busy', alerts: [],
     groupEvent: null, invitees: [], ...over
   };
@@ -767,10 +772,17 @@ function draftFromEvent(ev) {
   const s = new Date(ev.starts_at), e = new Date(ev.ends_at);
   return {
     id: ev.id, kind: ev.kind, reminder_type: ev.reminder_type || 'birthday', title: ev.title || '', date: dayKey(s), start: timeKey(s),
-    end: timeKey(ev.all_day ? s : e), all_day: ev.all_day, repeat: ev.repeat, location: ev.location || '', notes: ev.notes || '',
+    endDate: dayKey(ev.all_day ? (addDays(sod(e), -1) < s ? s : addDays(sod(e), -1)) : e), end: timeKey(ev.all_day ? addDays(s, 0) : e), all_day: ev.all_day, repeat: ev.repeat, location: ev.location || '', notes: ev.notes || '',
     is_private: ev.is_private, groups: [...(ev.share_group_ids || [])], detail: ev.detail, alerts: [...(ev.alerts || [])],
     groupEvent: ev.group_id || null, invitees: [], originalEnd: ev.ends_at
   };
+}
+const TIME_FIELDS = ['date', 'start', 'endDate', 'end'];
+// The start and end a draft describes (all-day ends are the start of the day after).
+function draftRange(d) {
+  if (d.kind === 'reminder') { const s = fromKey(d.date); return { s, e: addDays(s, 1) }; }
+  if (d.all_day) { const s = fromKey(d.date); return { s, e: addDays(fromKey(d.endDate || d.date), 1) }; }
+  return { s: combine(d.date, d.start), e: combine(d.endDate || d.date, d.end) };
 }
 function editorSheet() {
   const d = sheet.draft, rem = d.kind === 'reminder', grp = d.groupEvent ? S.groupsById[d.groupEvent] : null;
@@ -826,11 +838,15 @@ function editorSheet() {
     <div class="field"><label class="label" for="e-title">Title</label>
       <input class="input title-input" id="e-title" name="title" value="${esc(d.title)}" maxlength="120" required placeholder="${rem ? 'e.g. Mum’s birthday' : grp ? `Dinner with ${esc(grp.name)}` : 'e.g. Lunch with a friend'}"></div>
     <div class="card list">
-      <label class="list-row"><span class="grow">Date</span><input class="inline-input" type="date" name="date" value="${d.date}" required></label>
-      ${rem ? '' : `<button type="button" class="list-row" data-action="draft-allday" aria-pressed="${d.all_day}"><span class="grow">All day</span>${sw()}</button>`}
-      ${rem || d.all_day ? '' : `
-        <label class="list-row"><span class="grow">Starts</span><input class="inline-input" type="time" name="start" value="${d.start}" required></label>
-        <label class="list-row"><span class="grow">Ends</span><input class="inline-input" type="time" name="end" value="${d.end}" required></label>`}
+      ${rem ? `<label class="list-row"><span class="grow">Date</span><input class="inline-input" type="date" name="date" value="${d.date}" required></label>` : `
+        <button type="button" class="list-row" data-action="draft-allday" aria-pressed="${d.all_day}"><span class="grow">All day</span>${sw()}</button>
+        <div class="list-row"><span class="grow">Starts</span>
+          <input class="inline-input" type="date" name="date" value="${d.date}" aria-label="Start date" required>
+          ${d.all_day ? '' : `<input class="inline-input" type="time" name="start" value="${d.start}" aria-label="Start time" required>`}</div>
+        <div class="list-row"><span class="grow">Ends</span>
+          <input class="inline-input" type="date" name="endDate" value="${d.endDate || d.date}" min="${d.date}" aria-label="End date" required>
+          ${d.all_day ? '' : `<input class="inline-input" type="time" name="end" value="${d.end}" aria-label="End time" required>`}</div>
+        ${(() => { const r = draftRange(d); return r.e <= r.s ? `<div class="list-row label warn" role="alert">${icon('alert', 'sm')} It ends before it starts. Pick a later end.</div>` : ''; })()}`}
       <label class="list-row"><span class="grow">Repeat</span>
         <select class="inline-input" name="repeat" style="appearance:none;-webkit-appearance:none;font-weight:600">
           ${Object.entries(REPEAT_LABEL).map(([k, l]) => `<option value="${k}" ${d.repeat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
@@ -851,12 +867,9 @@ async function saveDraft() {
   if (!d.title.trim()) { showToast('Give it a title first.', true); sheet.focus = '#e-title'; renderSheet(); return; }
   if (!d.date) { showToast('Pick a date.', true); return; }
   const allDay = rem || d.all_day;
-  let starts, ends;
-  if (allDay) { starts = fromKey(d.date); ends = addDays(starts, 1); }
-  else {
-    starts = combine(d.date, d.start); ends = combine(d.date, d.end);
-    if (ends <= starts) ends = addDays(ends, 1); // ends after midnight
-  }
+  const { s: starts, e: ends } = draftRange(d);
+  if (isNaN(starts) || isNaN(ends)) { showToast('Pick a start and an end.', true); return; }
+  if (ends <= starts) { showToast('It ends before it starts. Pick a later end.', true); return; }
   const grp = d.groupEvent;
   const isPrivate = grp ? false : d.is_private || !d.groups.length;
   const row = {
@@ -982,7 +995,12 @@ const actions = {
   // editor
   'draft-kind': (el) => { const d = sheet.draft; d.kind = el.dataset.v; if (d.kind === 'reminder') { d.all_day = true; if (d.repeat === 'none') d.repeat = 'yearly'; d.alerts = [-540, 900]; } else { d.all_day = false; d.alerts = []; if (d.repeat === 'yearly') d.repeat = 'none'; } renderSheet(); },
   'draft-rtype': (el) => { sheet.draft.reminder_type = el.dataset.v; if (el.dataset.v === 'bill' && sheet.draft.repeat === 'yearly') sheet.draft.repeat = 'monthly'; renderSheet(); },
-  'draft-allday': () => { const d = sheet.draft; d.all_day = !d.all_day; d.alerts = []; renderSheet(); },
+  'draft-allday': () => {
+    const d = sheet.draft; d.all_day = !d.all_day; d.alerts = [];
+    if (!d.endDate || fromKey(d.endDate) < fromKey(d.date)) d.endDate = d.date;
+    if (!d.all_day) { const r = draftRange(d); if (r.e <= r.s) { const e = new Date(r.s.getTime() + HOUR); d.endDate = dayKey(e); d.end = timeKey(e); } }
+    renderSheet();
+  },
   'draft-private': () => { const d = sheet.draft; d.is_private = !d.is_private; renderSheet(); },
   'draft-group': (el) => {
     const d = sheet.draft, id = el.dataset.id;
@@ -1058,7 +1076,7 @@ const actions = {
     if (!F.sel || !g) return;
     const s = F.sel, e = new Date(s.getTime() + F.dur * HOUR);
     openSheet({ type: 'editor', label: 'Group event', focus: '#e-title', draft: newDraft({
-      date: dayKey(s), start: timeKey(s), end: timeKey(e), groupEvent: g.id, is_private: false, groups: [g.id], detail: 'full',
+      date: dayKey(s), start: timeKey(s), endDate: dayKey(e), end: timeKey(e), groupEvent: g.id, is_private: false, groups: [g.id], detail: 'full',
       invitees: g.members.filter((m) => m.id !== S.me.id).map((m) => m.id) }) });
   }
 };
@@ -1079,13 +1097,141 @@ document.addEventListener('click', (e) => {
   fn(el, e);
 });
 document.addEventListener('input', (e) => {
-  if (sheet?.type === 'editor' && e.target.name && e.target.closest('[data-form="editor"]')) sheet.draft[e.target.name] = e.target.value;
+  if (sheet?.type === 'editor' && e.target.name && !TIME_FIELDS.includes(e.target.name) && e.target.closest('[data-form="editor"]')) sheet.draft[e.target.name] = e.target.value;
   if (sheet?.type === 'new-group' && e.target.name === 'name') sheet.draft.name = e.target.value;
 });
 document.addEventListener('change', (e) => {
-  if (sheet?.type === 'editor' && e.target.name) sheet.draft[e.target.name] = e.target.value;
+  if (sheet?.type !== 'editor' || !e.target.name) return;
+  const d = sheet.draft, name = e.target.name;
+  if (!TIME_FIELDS.includes(name)) { d[name] = e.target.value; return; }
+  if (!e.target.value) return;
+  const before = draftRange(d);
+  d[name] = e.target.value;
+  if ((name === 'date' || name === 'start') && d.kind !== 'reminder') {
+    // Moving the start moves the end too, keeping the same length.
+    const ns = draftRange(d).s;
+    if (d.all_day) d.endDate = dayKey(addDays(ns, Math.max(1, Math.round((before.e - before.s) / (24 * HOUR))) - 1));
+    else { const ne = new Date(ns.getTime() + Math.max(15 * 60000, before.e - before.s || HOUR)); d.endDate = dayKey(ne); d.end = timeKey(ne); }
+  }
+  renderSheet();
 });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheet) closeSheet(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (drag.active) cancelDrag(); else if (sheet) closeSheet(); } });
+
+// ---------------------------------------------------------------- drag to move
+// Your own events can be dragged: up/down for time, sideways (week view) or onto
+// a date (week strip, week header, month grid) for the day. On touch screens,
+// press and hold first so normal scrolling still works.
+const drag = { el: null, ev: null, active: false, suppress: false, timer: null };
+document.addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('[data-drag]');
+  if (!el || sheet || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const ev = S.events.find((x) => x.id === el.dataset.id);
+  if (!ev || !ev.is_mine) return;
+  const r = el.getBoundingClientRect();
+  Object.assign(drag, { el, ev, occStart: new Date(el.dataset.start), x0: e.clientX, y0: e.clientY, offX: e.clientX - r.left, offY: e.clientY - r.top,
+    w: r.width, h: r.height, pointerId: e.pointerId, active: false, target: null, x: e.clientX, y: e.clientY });
+  clearTimeout(drag.timer);
+  if (e.pointerType !== 'mouse') drag.timer = setTimeout(() => { if (drag.el === el) startDrag(); }, 350);
+});
+document.addEventListener('pointermove', (e) => {
+  if (!drag.el || e.pointerId !== drag.pointerId) return;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (!drag.active) {
+    const moved = Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0);
+    if (e.pointerType === 'mouse') { if (moved > 6) startDrag(); else return; }
+    else { if (moved > 10) { clearTimeout(drag.timer); drag.el = null; } return; }
+  }
+  moveDrag();
+});
+document.addEventListener('pointerup', (e) => {
+  if (!drag.el || e.pointerId !== drag.pointerId) return;
+  clearTimeout(drag.timer);
+  if (drag.active) endDrag(); else drag.el = null;
+});
+document.addEventListener('pointercancel', () => { clearTimeout(drag.timer); if (drag.active) cancelDrag(); else drag.el = null; });
+document.addEventListener('touchmove', (e) => { if (drag.active) e.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', (e) => { if (drag.el) e.preventDefault(); });
+document.addEventListener('click', (e) => { if (drag.suppress) { drag.suppress = false; e.preventDefault(); e.stopPropagation(); } }, true);
+
+function startDrag() {
+  drag.active = true;
+  const g = drag.el.cloneNode(true);
+  g.removeAttribute('data-action'); g.removeAttribute('data-drag');
+  g.classList.add('drag-ghost');
+  g.style.cssText = `position:fixed;left:0;top:0;width:${drag.w}px;height:${drag.h}px;margin:0`;
+  document.body.appendChild(g);
+  drag.ghost = g;
+  drag.label = document.createElement('div');
+  drag.label.className = 'drag-label';
+  document.body.appendChild(drag.label);
+  drag.el.classList.add('drag-source');
+  document.body.classList.add('dragging');
+  moveDrag();
+}
+function dropTarget(x, y) {
+  const hit = document.elementFromPoint(x, y);
+  if (!hit) return null;
+  const ev = drag.ev, dur = new Date(ev.ends_at) - new Date(ev.starts_at), o = drag.occStart;
+  const col = hit.closest('[data-col]');
+  if (col) {
+    const d = fromKey(col.dataset.col);
+    if (ev.all_day) return { node: col, start: d, end: new Date(d.getTime() + dur) };
+    const r = col.getBoundingClientRect();
+    let mins = Math.round((((y - drag.offY) - r.top) / 48) * 60 / 15) * 15;
+    mins = Math.max(0, Math.min(24 * 60 - 15, mins));
+    const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, mins);
+    return { node: col, start, end: new Date(start.getTime() + dur) };
+  }
+  const day = hit.closest('[data-date]');
+  if (day) {
+    const d = fromKey(day.dataset.date);
+    const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), o.getHours(), o.getMinutes());
+    return { node: day, start, end: new Date(start.getTime() + dur) };
+  }
+  return null;
+}
+function moveDrag() {
+  const { x, y } = drag;
+  drag.ghost.style.transform = `translate(${x - drag.offX}px, ${y - drag.offY}px)`;
+  // Scroll the timeline when dragging near its top or bottom edge.
+  const wrap = document.querySelector('.timeline-wrap');
+  if (wrap) {
+    const r = wrap.getBoundingClientRect();
+    if (y < r.top + 40 && y > r.top - 60) wrap.scrollTop -= 12;
+    else if (y > r.bottom - 40 && y < r.bottom + 60) wrap.scrollTop += 12;
+  }
+  const t = dropTarget(x, y);
+  if (drag.target?.node && drag.target.node !== t?.node) drag.target.node.classList.remove('drop-target');
+  if (t) t.node.classList.add('drop-target');
+  drag.target = t;
+  drag.label.textContent = t ? `${fmtDate(t.start)}${drag.ev.all_day ? '' : ' · ' + fmtRange(t.start, t.end)}` : 'Drop on a day or time';
+  drag.label.style.transform = `translate(calc(${x}px - 50%), ${Math.max(8, y - drag.offY - 44)}px)`;
+}
+function cleanupDrag() {
+  drag.ghost?.remove(); drag.label?.remove();
+  drag.el?.classList.remove('drag-source');
+  drag.target?.node?.classList.remove('drop-target');
+  document.body.classList.remove('dragging');
+  Object.assign(drag, { el: null, active: false, ghost: null, label: null });
+}
+function cancelDrag() { cleanupDrag(); }
+function endDrag() {
+  const t = drag.target, ev = drag.ev, from = drag.occStart;
+  drag.suppress = true; setTimeout(() => { drag.suppress = false; }, 400);
+  cleanupDrag();
+  if (!t || t.start.getTime() === from.getTime()) return;
+  moveEvent(ev, t.start.getTime() - from.getTime(), t.start);
+}
+async function moveEvent(ev, delta, newStart) {
+  if (ev.repeat && ev.repeat !== 'none' && !confirm('This one repeats. Move every repeat by the same amount?')) return;
+  const before = { starts_at: ev.starts_at, ends_at: ev.ends_at };
+  const row = { starts_at: new Date(new Date(ev.starts_at).getTime() + delta).toISOString(), ends_at: new Date(new Date(ev.ends_at).getTime() + delta).toISOString() };
+  Object.assign(ev, row); render(); // show it in the new spot straight away
+  const { error } = await sb.from('events').update(row).eq('id', ev.id);
+  if (error) { Object.assign(ev, before); render(); showToast(niceError(error), true); return; }
+  showToast(`Moved to ${fmtDate(newStart)}${ev.all_day ? '' : ' at ' + fmtTime(newStart)}${ev.group_id ? '. Guests will see the new time.' : ''}`);
+  refresh(['events', 'invites']);
+}
 document.addEventListener('submit', async (e) => {
   const form = e.target.closest('[data-form]');
   if (!form) return;
@@ -1095,7 +1241,7 @@ document.addEventListener('submit', async (e) => {
   if (btn) btn.disabled = true;
   try {
     if (form.dataset.form === 'auth') await submitAuth(f);
-    else if (form.dataset.form === 'editor') { if (!sheet.saving) await saveDraft(); }
+    else if (form.dataset.form === 'editor') { for (const k of TIME_FIELDS) if (f[k]) sheet.draft[k] = f[k]; if (!sheet.saving) await saveDraft(); }
     else if (form.dataset.form === 'new-group') await createGroup();
     else if (form.dataset.form === 'add-member') await addMember(f.username);
     else if (form.dataset.form === 'profile') await saveProfile(f.name);

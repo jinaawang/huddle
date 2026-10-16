@@ -54,7 +54,7 @@ a { color: var(--brand-ink); }
 svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 svg.i.sm { width: 16px; height: 16px; }
 @media (prefers-reduced-motion: no-preference) {
-  .sheet { animation: slide-up 200ms ease-out; }
+  .sheet.enter { animation: slide-up 200ms ease-out; }
   .toast { animation: fade-in 160ms ease-out; }
 }
 @keyframes slide-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -172,6 +172,13 @@ textarea.input { height: 88px; padding: 12px 16px; resize: vertical; }
 .week-head .today .n { background: var(--brand); color: var(--on-brand); }
 .allday-week { display: grid; grid-template-columns: 44px repeat(7, minmax(0, 1fr)); gap: 2px; }
 .allday-week .chip { padding: 3px 4px; font-size: 11px; line-height: 13px; }
+
+[data-drag] { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; cursor: grab; }
+.drag-ghost { z-index: 50; pointer-events: none; box-shadow: var(--shadow); opacity: 0.95; outline: 2px solid var(--ink); outline-offset: -2px; }
+.drag-source { opacity: 0.35; }
+.drag-label { position: fixed; left: 0; top: 0; z-index: 51; pointer-events: none; background: var(--ink); color: var(--surface); padding: 6px 12px; border-radius: 999px; font-size: 13px; line-height: 16px; font-weight: 600; white-space: nowrap; box-shadow: var(--shadow); }
+.drop-target { outline: 2px dashed var(--brand) !important; outline-offset: -2px; }
+body.dragging, body.dragging * { cursor: grabbing !important; }
 
 /* ---------- Month & year ---------- */
 .month-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
