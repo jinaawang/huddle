@@ -7,3 +7,6 @@ export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiO
 // email address, so each username becomes  username@<this domain>.
 // No emails are ever sent to it. Only change this before anyone signs up.
 export const USERNAME_EMAIL_DOMAIN = 'users.huddle.app';
+
+// Public key for phone notifications (the matching private key goes in Supabase › Edge Functions › Secrets).
+export const VAPID_PUBLIC_KEY = 'BB_3muFIARuPXUPp4x2AlYhMCe3QVlB3DLRSceVJNnBrY4PXdL6Ruu6wiON9irj5OSvyET6A7zJ9gm21N03ywGk';

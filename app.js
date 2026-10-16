@@ -2,6 +2,7 @@
 // Plain JavaScript, no build step. Data lives in Supabase (see supabase/schema.sql).
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, USERNAME_EMAIL_DOMAIN } from './config.js';
+import * as CFG from './config.js';
 
 const configured = /^https?:\/\//.test(SUPABASE_URL) && !/^PASTE/.test(SUPABASE_ANON_KEY);
 const sb = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true } }) : null;
@@ -100,7 +101,7 @@ function occurrences(item, from, to) {
 const today = () => sod(new Date());
 const S = {
   session: null, me: null, ready: false,
-  tab: 'calendar', view: store.get('view', 'day'), date: today(),
+  tab: location.hash === '#invites' ? 'invites' : 'calendar', view: store.get('view', 'day'), date: today(),
   groups: [], groupsById: {},
   events: [], eventsKey: null,
   enabled: new Set(store.get('enabled', ['me'])),
@@ -320,7 +321,7 @@ function setupScreen() {
 
 function authScreen() {
   const create = S.authMode === 'create';
-  return `<main class="screen no-tabs" style="gap:24px">
+  return `<main class="screen no-tabs narrow" style="gap:24px">
     <div class="top"><div class="wordmark">Huddle</div>
       <div class="row" aria-hidden="true" style="gap:0">
         <span class="avatar c-blush" style="background:var(--evt-blush-soft);border:3px solid var(--surface)">M</span>
@@ -410,6 +411,11 @@ function calendarScreen() {
       ${pill('me', 'My calendar', 'tangerine')}
       ${S.groups.map((g) => pill(g.id, g.name, g.color)).join('')}
     </div>
+    ${pushState() === 'off' && !store.get('pushPromptDone', false) ? `<div class="card" style="flex-direction:row;align-items:center;gap:12px;padding:10px 8px 10px 12px">
+      <span class="avatar small" style="background:var(--brand-soft)" aria-hidden="true">${icon('bell', 'sm')}</span>
+      <span class="grow label">Get reminders and invites as notifications</span>
+      <button type="button" class="btn btn-primary sm" data-action="push-on">Turn on</button>
+      <button type="button" class="icon-btn plain" data-action="push-dismiss" aria-label="Not now">${icon('x')}</button></div>` : ''}
     ${dueAlerts().slice(0, 3).map((a) => `<div class="card c-${a.ev.kind === 'reminder' ? 'sun' : 'tangerine'}" role="status" style="flex-direction:row;align-items:center;gap:12px;padding:10px 8px 10px 12px;box-shadow:var(--shadow)">
       <span class="avatar small" style="background:var(--evt-soft)" aria-hidden="true">${icon('bell', 'sm')}</span>
       <button type="button" class="grow" data-action="open-event" data-id="${a.ev.id}" data-start="${a.start.toISOString()}" style="border:0;background:transparent;text-align:left;padding:0;font-weight:600">${esc(alertText(a))}</button>
@@ -427,7 +433,7 @@ function blockHtml(o, compact) {
   else sub = esc(o.ev.owner_name);
   return { L, sub };
 }
-function timedColumn(day, occs, compact) {
+function timedColumn(day, occs, compact, multi = compact) {
   const ds = sod(day), de = addDays(ds, 1);
   const items = occs.filter((o) => !o.ev.all_day && o.start < de && o.end > ds)
     .map((o) => ({ o, s: Math.max(o.start, ds), e: Math.min(o.end, de) }))
@@ -455,7 +461,7 @@ function timedColumn(day, occs, compact) {
   }).join('');
   const now = new Date();
   const nowLine = sameDay(day, now) ? `<div class="now-line" style="top:${((now - ds) / HOUR) * 48}px" aria-label="Now, ${fmtTime(now)}"></div>` : '';
-  return `<div class="col${compact && sameDay(day, now) ? ' today' : ''}" data-col="${dayKey(day)}">${blocks}${nowLine}</div>`;
+  return `<div class="col${multi && sameDay(day, now) ? ' today' : ''}" data-col="${dayKey(day)}">${blocks}${nowLine}</div>`;
 }
 function chipHtml(o, compact) {
   const L = look(o.ev);
@@ -494,7 +500,7 @@ function weekView() {
   const hasAllDay = occs.some((o) => o.ev.all_day);
   return `<div class="week-head"><span></span>${head}</div>
     ${hasAllDay ? `<div class="allday-week"><span class="caption muted" style="align-self:center">ALL DAY</span>${allDayCells}</div>` : ''}
-    <div class="timeline-wrap"><div class="timeline">${hoursCol()}<div class="cols multi" style="--days:7">${days.map((x) => timedColumn(x, occs, true)).join('')}</div></div></div>`;
+    <div class="timeline-wrap"><div class="timeline">${hoursCol()}<div class="cols multi" style="--days:7">${days.map((x) => timedColumn(x, occs, window.innerWidth < 900, true)).join('')}</div></div></div>`;
 }
 
 function monthView() {
@@ -511,14 +517,15 @@ function monthView() {
     const x = addDays(gs, i), k = dayKey(x), list = byDay[k] || [];
     const colors = [...new Set(list.map((o) => look(o.ev).color))].slice(0, 4);
     return `<button type="button" class="mcell${x.getMonth() !== d.getMonth() ? ' out' : ''}${sameDay(x, new Date()) ? ' today' : ''}" data-action="pick-day" data-date="${k}" aria-pressed="${sameDay(x, d)}" aria-label="${fmtDate(x)}${list.length ? `, ${list.length} item${list.length > 1 ? 's' : ''}` : ''}">
-      <span class="n">${x.getDate()}</span><span class="mdots" aria-hidden="true">${colors.map((c) => `<i class="c-${c}"></i>`).join('')}</span></button>`;
+      <span class="n">${x.getDate()}</span><span class="mdots" aria-hidden="true">${colors.map((c) => `<i class="c-${c}"></i>`).join('')}</span>
+      <span class="mlist" aria-hidden="true">${list.slice(0, 3).map((o) => { const L = look(o.ev); return `<i class="c-${L.color}${L.busy ? ' busy' : ''}">${esc(L.title)}</i>`; }).join('')}${list.length > 3 ? `<i class="more">+${list.length - 3} more</i>` : ''}</span></button>`;
   }).join('');
   const agenda = (byDay[dayKey(d)] || []).sort((a, b) => a.ev.all_day === b.ev.all_day ? a.start - b.start : a.ev.all_day ? -1 : 1);
-  return `<div class="month-grid">${WD_CAPS.map((w) => `<span class="wd caption">${w}</span>`).join('')}${grid}</div>
-    <section style="display:flex;flex-direction:column;gap:8px;margin-top:4px" aria-label="${fmtDate(d)}">
+  return `<div class="split"><div class="month-grid">${WD_CAPS.map((w) => `<span class="wd caption">${w}</span>`).join('')}${grid}</div>
+    <section class="side" style="display:flex;flex-direction:column;gap:8px;margin-top:4px" aria-label="${fmtDate(d)}">
       <h2 class="h2">${sameDay(d, new Date()) ? 'Today · ' : ''}${fmtDate(d)}</h2>
       ${agenda.length ? agenda.map((o) => chipHtml(o)).join('') : '<p class="note" style="margin:0">Nothing planned.</p>'}
-    </section>`;
+    </section></div>`;
 }
 
 function yearView() {
@@ -553,7 +560,7 @@ function groupsScreen() {
   return `<main class="screen">
     <header class="top"><h1 class="title">Groups</h1>
       <button type="button" class="btn btn-primary sm" data-action="new-group">${icon('plus')} New group</button></header>
-    ${rows || `<div class="card empty"><p style="margin:0">No groups yet.</p><p class="label" style="margin:0">Make one for your office, your friends or your family, then add people by their username.</p></div>`}
+    ${rows ? `<div class="card-grid">${rows}</div>` : `<div class="card empty"><p style="margin:0">No groups yet.</p><p class="label" style="margin:0">Make one for your office, your friends or your family, then add people by their username.</p></div>`}
     <p class="note">${icon('lock', 'sm')} Groups only see events you choose to share with them.</p>
   </main>`;
 }
@@ -619,6 +626,7 @@ function findScreen() {
     </div>
     <div class="seg" role="group" aria-label="Time of day">${Object.entries(WINDOWS).map(([k, v]) => `<button type="button" data-action="find-window" data-w="${k}" aria-pressed="${F.window === k}">${v[2]}</button>`).join('')}</div>
     <div class="seg" role="group" aria-label="How long">${[1, 2, 3].map((n) => `<button type="button" data-action="find-dur" data-n="${n}" aria-pressed="${F.dur === n}">${n} hr</button>`).join('')}</div>
+    <div class="split"><div class="main-col">
     <section class="heat" aria-label="How many people are free">
       <span></span>${Array.from({ length: 7 }, (_, i) => { const x = addDays(ws, i); return `<span class="hd"><span class="caption muted">${WD_CAPS[i]}</span><span style="font-weight:600">${x.getDate()}</span></span>`; }).join('')}
       ${rows}
@@ -626,7 +634,8 @@ function findScreen() {
     <div class="row label muted" style="gap:16px;padding-left:44px">
       <span class="row" style="gap:4px"><span style="width:12px;height:12px;border-radius:4px;background:var(--evt-olive-soft)"></span>Everyone free</span>
       <span>2/${members.length} = people free</span>
-    </div>
+    </div></div>
+    <div class="side" style="display:flex;flex-direction:column;gap:16px">
     <section style="display:flex;flex-direction:column;gap:8px">
       <h2 class="h2">Best times for ${F.dur} hour${F.dur > 1 ? 's' : ''}</h2>
       ${!byUser ? '<p class="note" style="margin:0">Checking calendars…</p>'
@@ -636,8 +645,8 @@ function findScreen() {
     </section>
     <button type="button" class="btn btn-primary big" data-action="plan-group" ${sel ? '' : 'disabled'} style="height:auto;min-height:56px;flex-direction:column;gap:0;padding:8px 16px">
       <span>Plan a group event</span>
-      <span class="label">${sel ? `${fmtDate(sel)} · ${esc(fmtRange(sel, selEnd))} · ${selFree === members.length ? 'everyone free' : `${selFree} of ${members.length} free`}` : 'Pick a time above'}</span>
-    </button>
+      <span class="label">${sel ? `${fmtDate(sel)} · ${esc(fmtRange(sel, selEnd))} · ${selFree === members.length ? 'everyone free' : `${selFree} of ${members.length} free`}` : 'Pick a time first'}</span>
+    </button></div></div>
   </main>`;
 }
 
@@ -674,7 +683,7 @@ function invitesScreen() {
   };
   return `<main class="screen">
     <h1 class="title">Invites</h1>
-    ${received.length ? received.map(card).join('') : '<div class="card empty"><p style="margin:0">No invites right now.</p><p class="label" style="margin:0">When someone plans a group event with you, it shows up here.</p></div>'}
+    ${received.length ? `<div class="card-grid">${received.map(card).join('')}</div>` : '<div class="card empty"><p style="margin:0">No invites right now.</p><p class="label" style="margin:0">When someone plans a group event with you, it shows up here.</p></div>'}
     <section style="display:flex;flex-direction:column;gap:8px">
       <h2 class="h2">Sent by you</h2>
       ${sent.length ? sent.map(sentRow).join('') : '<p class="note" style="margin:0">Use Find a time to plan something with a group.</p>'}
@@ -960,9 +969,86 @@ function meSheet() {
       <div class="row"><input class="input grow" id="p-name" name="name" value="${esc(S.me.display_name)}" maxlength="40" required>
       <button type="submit" class="btn btn-outline">Save</button></div>
     </form>
-    <div class="card"><span class="h2">Put Huddle on your Home Screen</span>
-      <span class="label muted">In Safari, tap the Share button, then “Add to Home Screen”. Huddle then opens like an app.</span></div>
+    ${notifCard()}
+    ${isStandalone() ? '' : `<div class="card"><span class="h2">Put Huddle on your Home Screen</span>
+      <span class="label muted">In Safari, tap the Share button, then “Add to Home Screen”. Huddle then opens like an app.</span></div>`}
     <button type="button" class="btn btn-outline big" data-action="sign-out">Sign out</button>`;
+}
+
+// ---------------------------------------------------------------- phone notifications
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+let swReg = null;
+function pushState() {
+  if (!CFG.VAPID_PUBLIC_KEY) return 'unconfigured';
+  if (isIOS && !isStandalone()) return 'home-screen';
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return 'unsupported';
+  if (Notification.permission === 'denied') return 'denied';
+  return S.pushOn ? 'on' : 'off';
+}
+async function initPush() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    swReg = await navigator.serviceWorker.register('sw.js');
+    const sub = await swReg.pushManager?.getSubscription();
+    S.pushOn = !!sub && window.Notification?.permission === 'granted';
+    // Make sure this phone is saved for whoever is signed in now.
+    if (S.pushOn && S.session) {
+      const j = sub.toJSON();
+      await sb.rpc('save_push_subscription', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth });
+    }
+  } catch (e) { console.warn('Notifications unavailable', e); }
+  render();
+}
+const b64ToBytes = (b64) => { const s = atob((b64 + '='.repeat((4 - b64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(s, (c) => c.charCodeAt(0)); };
+async function enablePush() {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { showToast('Notifications are blocked. You can allow them in iPhone Settings › Notifications › Huddle.', true); render(); return; }
+  try {
+    const reg = swReg || await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(CFG.VAPID_PUBLIC_KEY) });
+    const j = sub.toJSON();
+    const { error } = await sb.rpc('save_push_subscription', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth });
+    if (error) throw error;
+    S.pushOn = true; store.set('pushPromptDone', true);
+    showToast('Notifications are on for this phone');
+  } catch (e) { showToast(niceError(e), true); }
+  render();
+}
+async function disablePush(quiet) {
+  try {
+    const sub = await (swReg || await navigator.serviceWorker?.ready)?.pushManager?.getSubscription();
+    if (sub) { await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint); await sub.unsubscribe(); }
+  } catch (e) { console.warn(e); }
+  S.pushOn = false;
+  if (!quiet) { showToast('Notifications are off for this phone'); render(); }
+}
+async function testPush() {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/notify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${S.session.access_token}` },
+      body: JSON.stringify({ test: true })
+    });
+    const b = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(b.error || `The notify function isn't set up yet (error ${res.status}).`);
+    showToast(b.sent ? 'Test sent. It should pop up in a few seconds.' : 'No phone found. Turn notifications off and on again.', !b.sent);
+  } catch (e) { showToast(niceError(e), true); }
+}
+function notifCard() {
+  const st = pushState();
+  const body = {
+    on: `<span class="label muted">You'll get reminders, new invites and replies on this phone.</span>
+      <div class="row"><button type="button" class="btn btn-outline grow" data-action="push-test">Send a test</button><button type="button" class="btn btn-text" data-action="push-off">Turn off</button></div>`,
+    off: `<span class="label muted">Get reminders, new invites and replies on this phone, even when Huddle is closed.</span>
+      <button type="button" class="btn btn-primary" data-action="push-on">${icon('bell')} Turn on notifications</button>`,
+    'home-screen': `<span class="label muted">On iPhone, notifications only work once Huddle is on your Home Screen. In Safari tap Share, then “Add to Home Screen”, then open Huddle from there.</span>`,
+    denied: `<span class="label muted">Notifications are blocked for Huddle. Turn them on in iPhone Settings › Notifications › Huddle.</span>`,
+    unsupported: `<span class="label muted">This browser can't show notifications. On iPhone, update to iOS 16.4 or newer and add Huddle to your Home Screen.</span>`,
+    unconfigured: `<span class="label muted">Notifications aren't set up yet. See “Phone notifications” in the README.</span>`
+  }[st];
+  return `<div class="card"><span class="h2 row">${icon('bell', 'sm')} Notifications${st === 'on' ? ' <span class="status going" style="margin-left:auto">On</span>' : ''}</span>${body}</div>`;
 }
 
 // ---------------------------------------------------------------- toast
@@ -991,7 +1077,11 @@ const actions = {
   retry: () => { S.loadError = null; render(); bootstrap(); },
   backdrop: (el, e) => { if (e.target === el) closeSheet(); },
   me: () => openSheet({ type: 'me', label: 'Your account' }),
-  'sign-out': async () => { closeSheet(); await sb.auth.signOut(); },
+  'sign-out': async () => { closeSheet(); if (S.pushOn) await disablePush(true); await sb.auth.signOut(); },
+  'push-on': () => enablePush(),
+  'push-off': () => disablePush(),
+  'push-test': () => testPush(),
+  'push-dismiss': () => { store.set('pushPromptDone', true); render(); },
   // editor
   'draft-kind': (el) => { const d = sheet.draft; d.kind = el.dataset.v; if (d.kind === 'reminder') { d.all_day = true; if (d.repeat === 'none') d.repeat = 'yearly'; d.alerts = [-540, 900]; } else { d.all_day = false; d.alerts = []; if (d.repeat === 'yearly') d.repeat = 'none'; } renderSheet(); },
   'draft-rtype': (el) => { sheet.draft.reminder_type = el.dataset.v; if (el.dataset.v === 'bill' && sheet.draft.repeat === 'yearly') sheet.draft.repeat = 'monthly'; renderSheet(); },
@@ -1322,6 +1412,12 @@ async function saveProfile(name) {
   S.me.display_name = name; showToast('Saved'); render();
 }
 
+let resizeTimer, lastWide = window.innerWidth >= 900;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { const w = window.innerWidth >= 900; if (w !== lastWide) { lastWide = w; render(); } }, 150);
+});
+
 // ---------------------------------------------------------------- start
 if (!configured) render();
 else {
@@ -1329,8 +1425,13 @@ else {
     const was = S.session?.user?.id, now = session?.user?.id;
     S.session = session;
     if (!session) { S.ready = false; S.me = null; S.events = []; S.eventsKey = null; S.groups = []; S.invites = { received: [], sent: [] }; sheet = null; render(); return; }
-    if (was !== now) { S.ready = false; render(); setTimeout(bootstrap, 0); }
+    if (was !== now) { S.ready = false; render(); setTimeout(() => { bootstrap().then(initPush); }, 0); }
   });
+  // Tapping a notification while Huddle is open
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    if (e.data?.type === 'open' && /#invites$/.test(e.data.url) && S.ready) { S.tab = 'invites'; closeSheet(); render(); refresh(['invites', 'events']); }
+  });
+  window.addEventListener('hashchange', () => { if (location.hash === '#invites' && S.ready) { S.tab = 'invites'; render(); refresh(['invites']); } });
   sb.auth.getSession().then(({ data }) => { if (!data.session) render(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.ready) refresh(['events', 'invites']); });
   setInterval(() => { if (S.ready && document.visibilityState === 'visible' && S.tab === 'calendar' && !sheet) render(); }, 60000);

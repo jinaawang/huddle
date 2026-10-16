@@ -221,3 +221,56 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
 .loading { display: flex; align-items: center; justify-content: center; min-height: 60dvh; color: var(--muted); }
 .setup { max-width: 520px; margin: 0 auto; padding: 48px 20px; display: flex; flex-direction: column; gap: 16px; }
 .setup code { background: var(--sunken); padding: 2px 6px; border-radius: 6px; }
+
+/* ---------- Month cells: event titles (shown on iPad) ---------- */
+.mlist { display: none; flex-direction: column; gap: 2px; width: 100%; min-width: 0; }
+.mlist i { font-style: normal; font-size: 11px; line-height: 15px; font-weight: 600; color: var(--ink); background: var(--evt-soft); border-radius: 4px; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.mlist i.busy { background: var(--evt-slate-soft); }
+.mlist i.more { background: transparent; color: var(--muted); font-weight: 500; }
+.card-grid { display: flex; flex-direction: column; gap: 12px; }
+.split { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.split > * { min-width: 0; }
+.main-col { display: flex; flex-direction: column; gap: 4px; }
+
+/* ---------- iPad portrait and up ---------- */
+@media (min-width: 768px) {
+  .screen { max-width: 1120px; padding-left: 32px; padding-right: 32px; gap: 16px; }
+  .screen.narrow { max-width: 480px; padding-top: calc(env(safe-area-inset-top) + 64px); }
+  .scroll-x { margin: 0; padding: 0; flex-wrap: wrap; overflow: visible; }
+  .tabbar { width: min(560px, calc(100% - 64px)); }
+  .fab { right: max(32px, calc(50% - 528px)); bottom: calc(env(safe-area-inset-bottom) + 100px); }
+  .timeline-wrap { margin: 0; padding: 8px 0 0; max-height: calc(100dvh - 300px); }
+  .week-strip { gap: 8px; }
+  .week-strip button { height: 64px; border-radius: 20px; }
+  .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  /* Month: bigger cells with titles instead of dots */
+  .mcell { height: 104px; align-items: stretch; padding: 6px; gap: 4px; }
+  .mcell .n { align-self: flex-start; }
+  .mdots { display: none; }
+  .mlist { display: flex; }
+  /* Year: four months across */
+  .year-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .ymonth { padding: 12px 10px 10px; gap: 8px; }
+  .ymonth .name { font-size: 15px; line-height: 20px; }
+  .ydays span { height: 22px; font-size: 12px; line-height: 22px; }
+  /* Find a time: taller slots */
+  .heat { grid-template-columns: 56px repeat(7, minmax(0, 1fr)); gap: 6px; }
+  .slot { height: 48px; }
+  .heat .hl { line-height: 48px; font-size: 13px; }
+  /* Sheets become centred windows */
+  .sheet-backdrop { align-items: center; padding: 24px; }
+  .sheet { max-width: 600px; border-radius: 28px; max-height: calc(100dvh - 48px); padding: 20px 24px 24px; }
+  .sheet.full { height: auto; }
+  .sheet-grip { display: none; }
+  .sheet-head { top: -20px; }
+}
+
+/* ---------- iPad landscape and wider ---------- */
+@media (min-width: 1024px) {
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
+  .split > .side { position: sticky; top: 16px; }
+  .card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .year-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .mcell { height: 112px; }
+  .timeline-wrap { max-height: calc(100dvh - 280px); }
+}
