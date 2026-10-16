@@ -339,14 +339,14 @@ function authScreen() {
     </div>
     <form data-form="auth" style="display:flex;flex-direction:column;gap:16px" novalidate>
       ${create ? `<div class="field"><label class="label" for="a-name">Your name</label>
-        <input class="input" id="a-name" name="name" autocomplete="name" required maxlength="40" placeholder="Jina"></div>` : ''}
+        <input class="input" id="a-name" name="name" autocomplete="name" required maxlength="40" placeholder="Your name"></div>` : ''}
       ${create ? `<div class="field"><label class="label" for="a-email">Email</label>
         <input class="input" id="a-email" name="email" type="email" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="you@example.com"></div>
       <div class="field"><label class="label" for="a-user">Username</label>
-        <input class="input" id="a-user" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="jina"></div>
+        <input class="input" id="a-user" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="yourname"></div>
       <p class="note" style="margin:-8px 0 0">3–24 characters: letters, numbers, dots or underscores. Friends add you by this name. You can sign in with it or your email.</p>`
       : `<div class="field"><label class="label" for="a-login">Username or email</label>
-        <input class="input" id="a-login" name="login" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="jina or you@example.com"></div>`}
+        <input class="input" id="a-login" name="login" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="yourname or you@example.com"></div>`}
       <div class="field"><label class="label" for="a-pw">Password</label>
         <input class="input" id="a-pw" name="password" type="password" autocomplete="${create ? 'new-password' : 'current-password'}" required minlength="8" placeholder="At least 8 characters"></div>
       <button class="btn btn-primary big" type="submit">${create ? 'Create account' : 'Sign in'} ${icon('arrow')}</button>
@@ -824,7 +824,7 @@ function editorSheet() {
       <button type="button" data-action="draft-kind" data-v="reminder" aria-pressed="${rem}">Reminder</button></div>` : ''}
     ${rem ? `<div class="row wrap" role="group" aria-label="Kind of reminder">${REMINDER_TYPES.map(([k, l]) => `<button type="button" class="pill" data-action="draft-rtype" data-v="${k}" aria-pressed="${d.reminder_type === k}">${l}</button>`).join('')}</div>` : ''}
     <div class="field"><label class="label" for="e-title">Title</label>
-      <input class="input title-input" id="e-title" name="title" value="${esc(d.title)}" maxlength="120" required placeholder="${rem ? "Mai's birthday" : grp ? `Dinner with ${esc(grp.name)}` : 'Lunch with Mai'}"></div>
+      <input class="input title-input" id="e-title" name="title" value="${esc(d.title)}" maxlength="120" required placeholder="${rem ? 'e.g. Mum’s birthday' : grp ? `Dinner with ${esc(grp.name)}` : 'e.g. Lunch with a friend'}"></div>
     <div class="card list">
       <label class="list-row"><span class="grow">Date</span><input class="inline-input" type="date" name="date" value="${d.date}" required></label>
       ${rem ? '' : `<button type="button" class="list-row" data-action="draft-allday" aria-pressed="${d.all_day}"><span class="grow">All day</span>${sw()}</button>`}
