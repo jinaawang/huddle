@@ -219,9 +219,9 @@ async function bootstrap() {
     await loadProfile();
     await loadGroups();
     await Promise.all([loadEvents(true), loadInvites(), loadUpcoming()]);
-    S.ready = true;
+    S.ready = true; S.loadError = null;
   } catch (e) {
-    showToast(niceError(e), true);
+    S.loadError = niceError(e);
   }
   render();
 }
@@ -241,7 +241,7 @@ function niceError(e) {
   if (/Invalid login credentials/i.test(m)) return "That username and password don't match.";
   if (/already registered|already exists/i.test(m)) return 'That username is taken. Try another.';
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return "Can't reach Huddle's server. Check your connection.";
-  if (/email.*invalid|invalid.*email/i.test(m)) return 'Supabase rejected the sign-in address. See "Troubleshooting" in the README (USERNAME_EMAIL_DOMAIN).';
+  if (/email.*invalid|invalid.*email/i.test(m)) return "Supabase didn't accept that email address. Check it and try again.";
   return m;
 }
 
@@ -290,6 +290,10 @@ function render() {
   const keep = wrap ? wrap.scrollTop : null;
   if (!configured) $app.innerHTML = setupScreen();
   else if (!S.session) $app.innerHTML = authScreen();
+  else if (!S.ready && S.loadError) $app.innerHTML = `<div class="setup"><div class="wordmark">Huddle</div>
+    <h1 class="title">Couldn't load your calendar</h1><p class="muted" style="margin:0">${esc(S.loadError)}</p>
+    <button type="button" class="btn btn-primary big" data-action="retry">Try again</button>
+    <button type="button" class="btn btn-outline big" data-action="sign-out">Sign out</button></div>`;
   else if (!S.ready) $app.innerHTML = '<div class="loading">Loading your calendar…</div>';
   else $app.innerHTML = mainScreen();
   const w2 = $app.querySelector('.timeline-wrap');
@@ -336,9 +340,13 @@ function authScreen() {
     <form data-form="auth" style="display:flex;flex-direction:column;gap:16px" novalidate>
       ${create ? `<div class="field"><label class="label" for="a-name">Your name</label>
         <input class="input" id="a-name" name="name" autocomplete="name" required maxlength="40" placeholder="Jina"></div>` : ''}
+      ${create ? `<div class="field"><label class="label" for="a-email">Email</label>
+        <input class="input" id="a-email" name="email" type="email" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="you@example.com"></div>
       <div class="field"><label class="label" for="a-user">Username</label>
         <input class="input" id="a-user" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="jina"></div>
-      ${create ? '<p class="note" style="margin:-8px 0 0">3–24 characters: letters, numbers, dots or underscores. Friends add you by this name.</p>' : ''}
+      <p class="note" style="margin:-8px 0 0">3–24 characters: letters, numbers, dots or underscores. Friends add you by this name. You can sign in with it or your email.</p>`
+      : `<div class="field"><label class="label" for="a-login">Username or email</label>
+        <input class="input" id="a-login" name="login" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required placeholder="jina or you@example.com"></div>`}
       <div class="field"><label class="label" for="a-pw">Password</label>
         <input class="input" id="a-pw" name="password" type="password" autocomplete="${create ? 'new-password' : 'current-password'}" required minlength="8" placeholder="At least 8 characters"></div>
       <button class="btn btn-primary big" type="submit">${create ? 'Create account' : 'Sign in'} ${icon('arrow')}</button>
@@ -932,7 +940,7 @@ function newGroupSheet() {
 function meSheet() {
   return `<div class="sheet-grip"></div>
     <div class="row"><span class="avatar" aria-hidden="true">${initial(S.me.display_name)}</span>
-      <div class="grow"><h2 class="h-event">${esc(S.me.display_name)}</h2><span class="label muted">@${esc(S.me.username)}</span></div>
+      <div class="grow"><h2 class="h-event">${esc(S.me.display_name)}</h2><span class="label muted">@${esc(S.me.username)}${S.session?.user?.email && !S.session.user.email.endsWith('@' + USERNAME_EMAIL_DOMAIN) ? ' · ' + esc(S.session.user.email) : ''}</span></div>
       <button type="button" class="icon-btn plain" data-action="close" aria-label="Close">${icon('x')}</button></div>
     <form data-form="profile" class="field" novalidate>
       <label class="label" for="p-name">Your name</label>
@@ -967,6 +975,7 @@ const actions = {
   'new-event': () => openSheet({ type: 'editor', label: 'New event', draft: newDraft(), focus: '#e-title' }),
   'open-event': (el) => openEvent(el.dataset.id, el.dataset.start),
   close: () => closeSheet(),
+  retry: () => { S.loadError = null; render(); bootstrap(); },
   backdrop: (el, e) => { if (e.target === el) closeSheet(); },
   me: () => openSheet({ type: 'me', label: 'Your account' }),
   'sign-out': async () => { closeSheet(); await sb.auth.signOut(); },
@@ -1093,25 +1102,51 @@ document.addEventListener('submit', async (e) => {
   } finally { if (btn && btn.isConnected) btn.disabled = false; }
 });
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 async function submitAuth(f) {
-  const username = String(f.username || '').trim().toLowerCase().replace(/^@/, '');
   const password = String(f.password || '');
-  if (!/^[a-z0-9._]{3,24}$/.test(username)) { showToast('Usernames are 3–24 letters, numbers, dots or underscores.', true); return; }
-  if (password.length < 8) { showToast('Passwords need at least 8 characters.', true); return; }
-  const email = `${username}@${USERNAME_EMAIL_DOMAIN}`;
   if (S.authMode === 'create') {
+    const username = String(f.username || '').trim().toLowerCase().replace(/^@/, '');
+    const email = String(f.email || '').trim().toLowerCase();
     const name = String(f.name || '').trim();
     if (!name) { showToast('Add your name so friends recognise you.', true); return; }
+    if (!EMAIL_RE.test(email)) { showToast("That email address doesn't look right.", true); return; }
+    if (!/^[a-z0-9._]{3,24}$/.test(username)) { showToast('Usernames are 3–24 letters, numbers, dots or underscores.', true); return; }
+    if (password.length < 8) { showToast('Passwords need at least 8 characters.', true); return; }
     const { data: free, error: e1 } = await sb.rpc('username_available', { p_username: username });
     if (e1) { showToast(niceError(e1), true); return; }
     if (!free) { showToast('That username is taken. Try another.', true); return; }
     const { data, error } = await sb.auth.signUp({ email, password, options: { data: { username, display_name: name } } });
-    if (error) { showToast(niceError(error), true); return; }
+    if (error) { showToast(/already registered|already exists/i.test(error.message) ? 'That email already has an account. Try signing in.' : niceError(error), true); return; }
     if (!data.session) showToast('Account made, but Supabase wants email confirmation. Turn off "Confirm email" (see README), then sign in.', true);
-  } else {
-    const { error } = await sb.auth.signInWithPassword({ email, password });
-    if (error) showToast(niceError(error), true);
+    return;
   }
+  const login = String(f.login || '').trim().toLowerCase().replace(/^@(?=[^@]*$)/, '');
+  if (!login || !password) { showToast('Enter your username or email, and your password.', true); return; }
+  if (login.includes('@')) {
+    const { error } = await sb.auth.signInWithPassword({ email: login, password });
+    if (error) showToast(niceError(error), true);
+    return;
+  }
+  // Username: the "sign-in" function on Supabase finds the email for it.
+  let res;
+  try {
+    res = await fetch(`${SUPABASE_URL}/functions/v1/sign-in`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      body: JSON.stringify({ username: login, password })
+    });
+  } catch { res = null; }
+  if (res && res.ok) {
+    const s = await res.json();
+    const { error } = await sb.auth.setSession({ access_token: s.access_token, refresh_token: s.refresh_token });
+    if (error) showToast(niceError(error), true);
+    return;
+  }
+  if (res && res.status === 400) { const b = await res.json().catch(() => ({})); showToast(b.error || "That username and password don't match.", true); return; }
+  // Function not set up yet: fall back to accounts made before email sign-up existed.
+  const { error } = await sb.auth.signInWithPassword({ email: `${login}@${USERNAME_EMAIL_DOMAIN}`, password });
+  if (error) showToast(/Invalid login/i.test(error.message) ? "That username and password don't match. If you signed up with an email, try signing in with it." : niceError(error), true);
 }
 async function createGroup() {
   const d = sheet.draft;
