@@ -909,6 +909,7 @@ async function saveDraft() {
     if (grp && !d.id && d.invitees.length) {
       const { error } = await sb.from('invites').insert(d.invitees.map((u) => ({ event_id: id, user_id: u })));
       if (error) throw error;
+      kickNotify();
     }
     closeSheet();
     showToast(grp && !d.id ? `Invite sent to ${d.invitees.length} ${d.invitees.length === 1 ? 'person' : 'people'}` : rem ? 'Reminder saved' : 'Event saved');
@@ -1024,15 +1025,24 @@ async function disablePush(quiet) {
   S.pushOn = false;
   if (!quiet) { showToast('Notifications are off for this phone'); render(); }
 }
+// Ask the server to send any due notifications right now (new invites, replies).
+function kickNotify() {
+  if (!CFG.VAPID_PUBLIC_KEY) return;
+  fetch(`${SUPABASE_URL}/functions/v1/notify`, {
+    method: 'POST', keepalive: true,
+    headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    body: '{}'
+  }).catch(() => {});
+}
 async function testPush() {
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/notify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${S.session.access_token}` },
-      body: JSON.stringify({ test: true })
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      body: JSON.stringify({ test: true, token: (await sb.auth.getSession()).data.session?.access_token })
     });
     const b = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(b.error || `The notify function isn't set up yet (error ${res.status}).`);
+    if (!res.ok) throw new Error(b.error || b.message || (res.status === 404 ? "Supabase can't find a function called notify." : `Supabase said no (error ${res.status}${b.code ? ', ' + b.code : ''}).`));
     showToast(b.sent ? 'Test sent. It should pop up in a few seconds.' : 'No phone found. Turn notifications off and on again.', !b.sent);
   } catch (e) { showToast(niceError(e), true); }
 }
@@ -1114,6 +1124,7 @@ const actions = {
     const { error } = await sb.from('invites').update({ status: el.dataset.status, responded_at: new Date().toISOString() })
       .eq('event_id', el.dataset.id).eq('user_id', S.me.id);
     if (error) { showToast(niceError(error), true); return; }
+    kickNotify();
     showToast(el.dataset.status === 'going' ? "You're going. It's on your calendar." : "Got it. We'll let them know.");
     if (sheet?.type === 'event') closeSheet();
     refresh(['events', 'invites']);
