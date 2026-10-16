@@ -118,7 +118,7 @@ async function loadProfile() {
 }
 async function loadGroups() {
   const { data, error } = await sb.from('groups')
-    .select('id, name, color, default_detail, owner_id, created_at, group_members(user_id, profiles(id, username, display_name))')
+    .select('id, name, color, default_detail, owner_id, created_at, group_members(user_id, profiles!group_members_user_id_fkey(id, username, display_name))')
     .order('created_at');
   if (error) throw error;
   S.groups = (data || []).map((g) => ({
@@ -178,10 +178,10 @@ async function loadInvites() {
   const since = new Date(Date.now() - 24 * HOUR).toISOString();
   const [rec, sent] = await Promise.all([
     sb.from('invites')
-      .select('status, event_id, events(id, title, starts_at, ends_at, all_day, location, notes, repeat, group_id, owner_id, profiles(display_name), groups(name, color))')
+      .select('status, event_id, events(id, title, starts_at, ends_at, all_day, location, notes, repeat, group_id, owner_id, profiles!events_owner_id_fkey(display_name), groups!events_group_id_fkey(name, color))')
       .eq('user_id', me),
     sb.from('events')
-      .select('id, title, starts_at, ends_at, all_day, group_id, groups(name, color), invites(status, user_id, profiles(display_name))')
+      .select('id, title, starts_at, ends_at, all_day, group_id, groups!events_group_id_fkey(name, color), invites(status, user_id, profiles!invites_user_id_fkey(display_name))')
       .eq('owner_id', me).not('group_id', 'is', null).gte('ends_at', since).order('starts_at')
   ]);
   if (rec.error) throw rec.error;
@@ -705,7 +705,7 @@ async function openEvent(id, startIso) {
   const start = new Date(startIso);
   openSheet({ type: 'event', label: ev.title || 'Busy', ev, start, guests: null });
   if (ev.is_mine && ev.group_id) {
-    const { data } = await sb.from('invites').select('status, profiles(display_name)').eq('event_id', id);
+    const { data } = await sb.from('invites').select('status, profiles!invites_user_id_fkey(display_name)').eq('event_id', id);
     if (sheet && sheet.ev === ev) { sheet.guests = data || []; renderSheet(); }
   }
 }
