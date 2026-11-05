@@ -104,8 +104,9 @@ const S = {
   tab: location.hash === '#invites' ? 'invites' : 'calendar', view: store.get('view', 'day'), date: today(),
   groups: [], groupsById: {},
   events: [], eventsKey: null,
-  enabled: new Set(store.get('enabled', ['me'])),
-  invites: { received: [], sent: [] },
+  enabled: new Set(store.get('enabled', ['me', 'partner'])),
+  invites: { received: [], sent: [] }, requests: { groups: [], partners: [] },
+  partner: null, partnerPending: null,
   find: { groupId: null, weekStart: startOfWeek(new Date()), window: store.get('findWindow', 'evening'), dur: 2, busy: null, sel: null },
   authMode: 'create', scrollToNow: true
 };
@@ -113,23 +114,40 @@ let sheet = null; // the open bottom sheet, if any
 
 // ---------------------------------------------------------------- data
 async function loadProfile() {
-  const { data, error } = await sb.from('profiles').select('id, username, display_name').eq('id', S.session.user.id).single();
+  const { data, error } = await sb.from('profiles').select('id, username, display_name, avatar_url').eq('id', S.session.user.id).single();
   if (error) throw error;
   S.me = data;
 }
 async function loadGroups() {
   const { data, error } = await sb.from('groups')
-    .select('id, name, color, default_detail, owner_id, created_at, group_members(user_id, profiles!group_members_user_id_fkey(id, username, display_name))')
+    .select('id, name, color, owner_id, created_at, photo_url, group_members(user_id, status, profiles!group_members_user_id_fkey(id, username, display_name, avatar_url))')
     .order('created_at');
   if (error) throw error;
-  S.groups = (data || []).map((g) => ({
-    ...g,
-    members: (g.group_members || []).map((m) => m.profiles).filter(Boolean)
-      .sort((a, b) => (a.id === S.me.id ? -1 : b.id === S.me.id ? 1 : a.display_name.localeCompare(b.display_name)))
-  }));
+  const byName = (a, b) => (a.id === S.me.id ? -1 : b.id === S.me.id ? 1 : a.display_name.localeCompare(b.display_name));
+  S.groups = (data || [])
+    // groups you've only been invited to show up under Invites instead
+    .filter((g) => g.owner_id === S.me.id || (g.group_members || []).some((m) => m.user_id === S.me.id && m.status === 'active'))
+    .map((g) => ({
+      ...g,
+      members: (g.group_members || []).filter((m) => m.status === 'active').map((m) => m.profiles).filter(Boolean).sort(byName),
+      waiting: (g.group_members || []).filter((m) => m.status === 'pending').map((m) => m.profiles).filter(Boolean).sort(byName)
+    }));
   S.groupsById = Object.fromEntries(S.groups.map((g) => [g.id, g]));
-  for (const id of [...S.enabled]) if (id !== 'me' && !S.groupsById[id]) S.enabled.delete(id);
+  for (const id of [...S.enabled]) if (id !== 'me' && id !== 'partner' && !S.groupsById[id]) S.enabled.delete(id);
   if (!S.find.groupId || !S.groupsById[S.find.groupId]) S.find.groupId = S.groups[0]?.id || null;
+}
+// Your partner (if any), and partner requests waiting on you.
+async function loadPartner() {
+  const { data, error } = await sb.from('partnerships')
+    .select('id, user_a, user_b, requested_by, status, created_at, a:profiles!partnerships_user_a_fkey(id, username, display_name, avatar_url), b:profiles!partnerships_user_b_fkey(id, username, display_name, avatar_url)');
+  if (error) throw error;
+  const other = (r) => (r.user_a === S.me.id ? r.b : r.a);
+  const rows = data || [];
+  const active = rows.find((r) => r.status === 'active');
+  S.partner = active ? { id: active.id, since: active.created_at, ...other(active) } : null;
+  const out = rows.find((r) => r.status === 'pending' && r.requested_by === S.me.id);
+  S.partnerPending = out ? { id: out.id, ...other(out) } : null;
+  S.requests.partners = rows.filter((r) => r.status === 'pending' && r.requested_by !== S.me.id).map((r) => ({ id: r.id, from: other(r) }));
 }
 function viewRange() {
   const d = S.date;
@@ -177,14 +195,18 @@ function alertText(a) {
 async function loadInvites() {
   const me = S.me.id;
   const since = new Date(Date.now() - 24 * HOUR).toISOString();
-  const [rec, sent] = await Promise.all([
+  const [rec, sent, gReq] = await Promise.all([
     sb.from('invites')
-      .select('status, event_id, events(id, title, starts_at, ends_at, all_day, location, notes, repeat, group_id, owner_id, profiles!events_owner_id_fkey(display_name), groups!events_group_id_fkey(name, color))')
+      .select('status, event_id, events(id, title, starts_at, ends_at, all_day, location, repeat, group_id, owner_id, profiles!events_owner_id_fkey(display_name), groups!events_group_id_fkey(name, color))')
       .eq('user_id', me),
     sb.from('events')
       .select('id, title, starts_at, ends_at, all_day, group_id, groups!events_group_id_fkey(name, color), invites(status, user_id, profiles!invites_user_id_fkey(display_name))')
-      .eq('owner_id', me).not('group_id', 'is', null).gte('ends_at', since).order('starts_at')
+      .eq('owner_id', me).not('group_id', 'is', null).gte('ends_at', since).order('starts_at'),
+    sb.from('group_members')
+      .select('group_id, invited_at, groups(id, name, color, photo_url), inviter:profiles!group_members_invited_by_fkey(display_name, avatar_url)')
+      .eq('user_id', me).eq('status', 'pending').order('invited_at', { ascending: false })
   ]);
+  S.requests.groups = gReq.error ? [] : (gReq.data || []).filter((g) => g.groups);
   if (rec.error) throw rec.error;
   if (sent.error) throw sent.error;
   const received = (rec.data || []).filter((r) => r.events && new Date(r.events.ends_at) > new Date(since))
@@ -219,7 +241,7 @@ async function bootstrap() {
   try {
     await loadProfile();
     await loadGroups();
-    await Promise.all([loadEvents(true), loadInvites(), loadUpcoming()]);
+    await Promise.all([loadEvents(true), loadInvites(), loadUpcoming(), loadPartner()]);
     S.ready = true; S.loadError = null;
   } catch (e) {
     S.loadError = niceError(e);
@@ -231,7 +253,7 @@ async function refresh(what = ['events']) {
     const jobs = [];
     if (what.includes('groups')) await loadGroups();
     if (what.includes('events')) jobs.push(loadEvents(true), loadUpcoming());
-    if (what.includes('invites')) jobs.push(loadInvites());
+    if (what.includes('invites')) jobs.push(loadInvites(), loadPartner());
     if (what.includes('find')) jobs.push(loadFind());
     await Promise.all(jobs);
   } catch (e) { showToast(niceError(e), true); }
@@ -255,22 +277,36 @@ function look(ev) {
   else if (ev.kind === 'reminder') color = 'sun';
   else if (ev.is_mine) color = ev.group_id ? groupColor(ev.group_id) : 'tangerine';
   else if (ev.my_status) color = ev.group_id ? groupColor(ev.group_id) : 'blush';
+  else if (ev.is_partner) color = 'olive';
   else color = groupColor((ev.share_group_ids || []).find((g) => S.enabled.has(g)) || ev.share_group_ids?.[0]);
   const title = busy ? `${ev.owner_name} · busy` : ev.title;
   const pending = !ev.is_mine && ev.my_status === 'pending';
   return { color, title, busy, pending };
 }
+// What your own event shows to others. Everyone in your groups sees "busy"; chosen groups see details.
 function shareText(ev) {
-  if (ev.is_private || !(ev.share_group_ids || []).length) return { icon: 'lock', text: 'Private' };
-  const names = ev.share_group_ids.map((g) => S.groupsById[g]?.name).filter(Boolean);
-  return ev.detail === 'full' || ev.kind === 'reminder'
+  const names = (ev.share_group_ids || []).map((g) => S.groupsById[g]?.name).filter(Boolean);
+  if (ev.kind === 'reminder') return names.length ? { icon: 'eye', text: `${listNames(names)} see${names.length === 1 ? 's' : ''} it` } : { icon: 'lock', text: S.partner ? 'You and your partner' : 'Only you' };
+  return names.length
     ? { icon: 'eye', text: `${listNames(names)} see${names.length === 1 ? 's' : ''} details` }
-    : { icon: 'eyeOff', text: `${listNames(names)} see${names.length === 1 ? 's' : ''} busy only` };
+    : { icon: 'eyeOff', text: 'Everyone sees busy' };
 }
 function onCalendar(ev) {
   if (ev.is_mine) return S.enabled.has('me');
   if (ev.my_status && ev.my_status !== 'declined') return S.enabled.has('me');
-  return (ev.share_group_ids || []).some((g) => S.enabled.has(g));
+  if (ev.is_partner) return S.enabled.has('partner');
+  return [...(ev.share_group_ids || []), ...(ev.common_group_ids || [])].some((g) => S.enabled.has(g));
+}
+// A person's photo, or their initial on a coloured disc.
+function avatarHtml(p, cls = 'small', extra = '') {
+  if (p?.avatar_url) return `<span class="avatar ${cls} photo" ${extra}><img src="${esc(p.avatar_url)}" alt=""></span>`;
+  return `<span class="avatar ${cls}" ${extra}>${initial(p?.display_name)}</span>`;
+}
+function groupPicHtml(g, size = 40) {
+  const st = `width:${size}px;height:${size}px;border-radius:${Math.round(size * 0.3)}px`;
+  if (g?.photo_url) return `<span class="gpic c-${g.color}" style="${st}" aria-hidden="true"><img src="${esc(g.photo_url)}" alt=""></span>`;
+  const short = (g?.name || '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  return `<span class="gpic c-${g?.color || 'blush'}" style="${st};font-size:${Math.round(size * 0.32)}px" aria-hidden="true">${esc(short)}</span>`;
 }
 function occsBetween(from, to) {
   const out = [];
@@ -306,8 +342,16 @@ function render() {
       S.scrollToNow = false;
     } else if (keep != null) w2.scrollTop = keep;
   }
+  // Month: size the rows so the whole month fits above the tab bar.
+  const mc = $app.querySelector('.month-cells');
+  if (mc) {
+    const top = Math.round(mc.getBoundingClientRect().top + window.scrollY);
+    if (Math.abs(top - monthTop) > 4 && !render.again) { monthTop = top; render.again = true; render(); render.again = false; return; }
+  }
   renderSheet();
 }
+let monthTop = 300;
+const monthRowH = (rows) => Math.max(56, (window.innerHeight - monthTop - (window.innerWidth >= 700 ? 120 : 108)) / rows);
 
 function setupScreen() {
   return `<div class="setup">
@@ -357,7 +401,7 @@ function authScreen() {
 }
 
 function tabbar() {
-  const pending = S.invites.received.filter((r) => r.status === 'pending').length;
+  const pending = S.invites.received.filter((r) => r.status === 'pending').length + S.requests.groups.length + S.requests.partners.length;
   const tab = (id, ic, label, extra = '') =>
     `<button type="button" data-action="tab" data-tab="${id}" ${S.tab === id ? 'aria-current="page"' : ''}>${icon(ic)}${label}${extra}</button>`;
   return `<nav class="tabbar" aria-label="Main">
@@ -402,13 +446,14 @@ function calendarScreen() {
       <div class="row">
         <button type="button" class="icon-btn" data-action="prev" aria-label="Previous">${icon('chevL')}</button>
         <button type="button" class="icon-btn" data-action="next" aria-label="Next">${icon('chevR')}</button>
-        <button type="button" class="avatar" data-action="me" aria-label="Your account, ${esc(S.me.display_name)}">${initial(S.me.display_name)}</button>
+        ${S.me.avatar_url ? `<button type="button" class="avatar photo" data-action="me" aria-label="Your account, ${esc(S.me.display_name)}"><img src="${esc(S.me.avatar_url)}" alt=""></button>` : `<button type="button" class="avatar" data-action="me" aria-label="Your account, ${esc(S.me.display_name)}">${initial(S.me.display_name)}</button>`}
       </div>
     </header>
     <nav class="seg" aria-label="Calendar view">${viewBtn('day', 'Day')}${viewBtn('week', 'Week')}${viewBtn('month', 'Month')}${viewBtn('year', 'Year')}</nav>
     <div class="scroll-x" role="group" aria-label="Calendars to show">
       ${showingToday ? '' : '<button type="button" class="pill" data-action="today">Today</button>'}
       ${pill('me', 'My calendar', 'tangerine')}
+      ${S.partner ? pill('partner', S.partner.display_name, 'olive') : ''}
       ${S.groups.map((g) => pill(g.id, g.name, g.color)).join('')}
     </div>
     ${pushState() === 'off' && !store.get('pushPromptDone', false) ? `<div class="card" style="flex-direction:row;align-items:center;gap:12px;padding:10px 8px 10px 12px">
@@ -484,7 +529,7 @@ function dayView() {
   return `<div class="week-strip">${strip}</div>
     ${allDay.length ? `<div class="allday">${allDay.map((o) => chipHtml(o)).join('')}</div>` : ''}
     ${!occs.length ? '<p class="note" style="margin:0">Nothing planned. Tap + to add an event or a reminder.</p>' : ''}
-    <div class="timeline-wrap"><div class="timeline">${hoursCol()}<div class="cols" style="--days:1">${timedColumn(d, timed, false)}</div></div></div>`;
+    <div class="timeline-wrap swipe-area" data-swipe="x"><div class="timeline">${hoursCol()}<div class="cols" style="--days:1">${timedColumn(d, timed, false)}</div></div></div>`;
 }
 
 function weekView() {
@@ -500,32 +545,33 @@ function weekView() {
   const hasAllDay = occs.some((o) => o.ev.all_day);
   return `<div class="week-head"><span></span>${head}</div>
     ${hasAllDay ? `<div class="allday-week"><span class="caption muted" style="align-self:center">ALL DAY</span>${allDayCells}</div>` : ''}
-    <div class="timeline-wrap"><div class="timeline">${hoursCol()}<div class="cols multi" style="--days:7">${days.map((x) => timedColumn(x, occs, window.innerWidth < 900, true)).join('')}</div></div></div>`;
+    <div class="timeline-wrap swipe-area" data-swipe="x"><div class="timeline">${hoursCol()}<div class="cols multi" style="--days:7">${days.map((x) => timedColumn(x, occs, window.innerWidth < 900, true)).join('')}</div></div></div>`;
 }
 
 function monthView() {
   const d = S.date, first = new Date(d.getFullYear(), d.getMonth(), 1);
   const gs = startOfWeek(first);
   const daysIn = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-  const cells = Math.ceil((((first.getDay() + 6) % 7) + daysIn) / 7) * 7;
+  const cells = Math.ceil((((first.getDay() + 6) % 7) + daysIn) / 7) * 7, rows = cells / 7;
   const occs = occsBetween(gs, addDays(gs, cells));
   const byDay = {};
   for (const o of occs) {
     for (let x = sod(o.start); x < o.end; x = addDays(x, 1)) (byDay[dayKey(x)] ||= []).push(o);
   }
+  // How many titles fit in a day: rows share the screen height.
+  const rowH = monthRowH(rows);
+  const fit = Math.max(1, Math.floor((rowH - 26) / 16));
   const grid = Array.from({ length: cells }, (_, i) => {
-    const x = addDays(gs, i), k = dayKey(x), list = byDay[k] || [];
-    const colors = [...new Set(list.map((o) => look(o.ev).color))].slice(0, 4);
-    return `<button type="button" class="mcell${x.getMonth() !== d.getMonth() ? ' out' : ''}${sameDay(x, new Date()) ? ' today' : ''}" data-action="pick-day" data-date="${k}" aria-pressed="${sameDay(x, d)}" aria-label="${fmtDate(x)}${list.length ? `, ${list.length} item${list.length > 1 ? 's' : ''}` : ''}">
-      <span class="n">${x.getDate()}</span><span class="mdots" aria-hidden="true">${colors.map((c) => `<i class="c-${c}"></i>`).join('')}</span>
-      <span class="mlist" aria-hidden="true">${list.slice(0, 3).map((o) => { const L = look(o.ev); return `<i class="c-${L.color}${L.busy ? ' busy' : ''}">${esc(L.title)}</i>`; }).join('')}${list.length > 3 ? `<i class="more">+${list.length - 3} more</i>` : ''}</span></button>`;
+    const x = addDays(gs, i), k = dayKey(x), list = (byDay[k] || []).sort((a, b) => (b.ev.all_day - a.ev.all_day) || (a.start - b.start));
+    const shown = list.length > fit ? list.slice(0, fit - 1) : list;
+    return `<button type="button" class="mcell${x.getMonth() !== d.getMonth() ? ' out' : ''}${sameDay(x, new Date()) ? ' today' : ''}" data-action="pick-day" data-date="${k}" data-go="day" aria-label="${fmtDate(x)}${list.length ? ': ' + esc(list.map((o) => look(o.ev).title).join(', ')) : ''}">
+      <span class="n">${x.getDate()}</span>
+      <span class="mlist" aria-hidden="true">${shown.map((o) => { const L = look(o.ev); return `<i class="c-${L.color}${L.busy ? ' busy' : ''}${L.pending ? ' pending' : ''}"${o.ev.is_mine ? ` data-drag="1" data-id="${o.ev.id}" data-start="${o.start.toISOString()}"` : ''}>${esc(L.title)}</i>`; }).join('')}${list.length > shown.length ? `<i class="more">+${list.length - shown.length} more</i>` : ''}</span></button>`;
   }).join('');
-  const agenda = (byDay[dayKey(d)] || []).sort((a, b) => a.ev.all_day === b.ev.all_day ? a.start - b.start : a.ev.all_day ? -1 : 1);
-  return `<div class="split"><div class="month-grid">${WD_CAPS.map((w) => `<span class="wd caption">${w}</span>`).join('')}${grid}</div>
-    <section class="side" style="display:flex;flex-direction:column;gap:8px;margin-top:4px" aria-label="${fmtDate(d)}">
-      <h2 class="h2">${sameDay(d, new Date()) ? 'Today · ' : ''}${fmtDate(d)}</h2>
-      ${agenda.length ? agenda.map((o) => chipHtml(o)).join('') : '<p class="note" style="margin:0">Nothing planned.</p>'}
-    </section></div>`;
+  return `<div class="swipe-area month-wrap" data-swipe="y" style="--rows:${rows}">
+    <div class="month-grid month-head">${WD_CAPS.map((w) => `<span class="wd caption">${w}</span>`).join('')}</div>
+    <div class="month-grid month-cells" style="grid-auto-rows:${rowH}px">${grid}</div>
+  </div>`;
 }
 
 function yearView() {
@@ -545,23 +591,33 @@ function yearView() {
     return `<button type="button" class="ymonth${y === now.getFullYear() && m === now.getMonth() ? ' current' : ''}" data-action="pick-month" data-month="${m}" aria-label="${MONTH[m]} ${y}">
       <span class="name">${name}</span><span class="ydays" aria-hidden="true">${cells}</span></button>`;
   }).join('');
-  return `<div class="year-grid">${months}</div><p class="note" style="margin:0">Bold days have something planned.</p>`;
+  return `<div class="swipe-area" data-swipe="y"><div class="year-grid">${months}</div><p class="note" style="margin:8px 0 0">Bold days have something planned. Swipe up or down to change year.</p></div>`;
 }
 
 // ---------- groups
 function groupsScreen() {
   const rows = S.groups.map((g) => `
-    <button type="button" class="card c-${g.color}" data-action="open-group" data-id="${g.id}" style="flex-direction:row;align-items:center;gap:12px;border:0;border-radius:999px;padding:8px 16px 8px 8px;text-align:left">
-      <span class="avatar" style="background:var(--evt-soft)" aria-hidden="true"><span class="dot" style="width:12px;height:12px"></span></span>
+    <button type="button" class="card" data-action="open-group" data-id="${g.id}" style="flex-direction:row;align-items:center;gap:12px;border:0;border-radius:999px;padding:8px 16px 8px 8px;text-align:left">
+      ${groupPicHtml(g, 44)}
       <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(g.name)}</span>
-        <span class="label muted">${g.members.length} ${g.members.length === 1 ? 'person' : 'people'}${g.owner_id === S.me.id ? ' · you manage this' : ''}</span></span>
+        <span class="label muted">${g.members.length} ${g.members.length === 1 ? 'person' : 'people'}${g.waiting.length ? ` · ${g.waiting.length} waiting` : ''}${g.owner_id === S.me.id ? ' · you manage this' : ''}</span></span>
       ${icon('chevR')}
     </button>`).join('');
+  const partner = S.partner
+    ? `<button type="button" class="card" data-action="me" style="flex-direction:row;align-items:center;gap:12px;border:0;border-radius:999px;padding:8px 16px 8px 8px;text-align:left">
+        ${avatarHtml(S.partner, '')}
+        <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(S.partner.display_name)} · your partner</span><span class="label muted">You see each other's whole calendar</span></span>
+        <span class="status going">Partner</span></button>`
+    : `<button type="button" class="card" data-action="me" style="flex-direction:row;align-items:center;gap:12px;border:0;border-radius:999px;padding:8px 16px 8px 8px;text-align:left">
+        <span class="avatar" aria-hidden="true">${icon('users', 'sm')}</span>
+        <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${S.partnerPending ? `Waiting for ${esc(S.partnerPending.display_name)}` : 'Add a partner'}</span><span class="label muted">Someone who sees your whole calendar</span></span>
+        ${icon('chevR')}</button>`;
   return `<main class="screen">
     <header class="top"><h1 class="title">Groups</h1>
       <button type="button" class="btn btn-primary sm" data-action="new-group">${icon('plus')} New group</button></header>
-    ${rows ? `<div class="card-grid">${rows}</div>` : `<div class="card empty"><p style="margin:0">No groups yet.</p><p class="label" style="margin:0">Make one for your office, your friends or your family, then add people by their username.</p></div>`}
-    <p class="note">${icon('lock', 'sm')} Groups only see events you choose to share with them.</p>
+    ${partner}
+    ${rows ? `<div class="card-grid">${rows}</div>` : `<div class="card empty"><p style="margin:0">No groups yet.</p><p class="label" style="margin:0">Make one for your office, your friends or your family, then invite people by their username.</p></div>`}
+    <p class="note">${icon('eyeOff', 'sm')} Your groups see when you're busy. They only see what you're doing for events you show them.</p>
   </main>`;
 }
 
@@ -681,9 +737,23 @@ function invitesScreen() {
       <span class="label muted">${fmtDate(s)} · ${going} of ${inv.length} going</span></span>
       <span class="icon-btn" aria-hidden="true">${icon('arrow')}</span></button>`;
   };
+  const { groups: gReqs, partners: pReqs } = S.requests;
+  const reqCards = [
+    ...pReqs.map((r) => `<article class="card">
+      <div class="row">${avatarHtml(r.from, '')}<div class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(r.from?.display_name)} wants to be your partner</span><span class="label muted">@${esc(r.from?.username)}</span></div></div>
+      <span class="label muted">Partners see each other's whole calendar, with every detail. You can only have one partner.</span>
+      <div class="row"><button type="button" class="btn btn-accent grow" data-action="partner-reply" data-id="${r.id}" data-v="1">Accept</button>
+        <button type="button" class="btn btn-outline" data-action="partner-reply" data-id="${r.id}" data-v="0">Decline</button></div></article>`),
+    ...gReqs.map((r) => `<article class="card">
+      <div class="row">${groupPicHtml(r.groups, 44)}<div class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">Join ${esc(r.groups.name)}?</span><span class="label muted">${esc(r.inviter?.display_name || 'Someone')} invited you</span></div></div>
+      <span class="label muted">Once you join, everyone in ${esc(r.groups.name)} sees when you're busy.</span>
+      <div class="row"><button type="button" class="btn btn-accent grow" data-action="group-reply" data-id="${r.group_id}" data-v="1">Join group</button>
+        <button type="button" class="btn btn-outline" data-action="group-reply" data-id="${r.group_id}" data-v="0">Decline</button></div></article>`)
+  ].join('');
   return `<main class="screen">
     <h1 class="title">Invites</h1>
-    ${received.length ? `<div class="card-grid">${received.map(card).join('')}</div>` : '<div class="card empty"><p style="margin:0">No invites right now.</p><p class="label" style="margin:0">When someone plans a group event with you, it shows up here.</p></div>'}
+    ${reqCards ? `<section style="display:flex;flex-direction:column;gap:8px"><h2 class="h2">Requests</h2><div class="card-grid">${reqCards}</div></section>` : ''}
+    ${received.length ? `${reqCards ? '<h2 class="h2">Events</h2>' : ''}<div class="card-grid">${received.map(card).join('')}</div>` : reqCards ? '' : '<div class="card empty"><p style="margin:0">No invites right now.</p><p class="label" style="margin:0">When someone plans a group event with you, it shows up here.</p></div>'}
     <section style="display:flex;flex-direction:column;gap:8px">
       <h2 class="h2">Sent by you</h2>
       ${sent.length ? sent.map(sentRow).join('') : '<p class="note" style="margin:0">Use Find a time to plan something with a group.</p>'}
@@ -695,6 +765,9 @@ function invitesScreen() {
 function openSheet(s) { sheet = s; renderSheet(); }
 function closeSheet() { sheet = null; renderSheet(); }
 function renderSheet() {
+  // Let a half-typed field save itself (its change event) before the sheet is redrawn.
+  const act = document.activeElement;
+  if (act && $sheet.contains(act) && act.matches('input, textarea, select')) act.blur();
   if (!sheet) { $sheet.innerHTML = ''; document.body.style.overflow = ''; return; }
   const keep = $sheet.querySelector('.sheet')?.scrollTop;
   let inner = '';
@@ -773,7 +846,7 @@ function newDraft(over = {}) {
   const end = new Date(start.getTime() + HOUR);
   return {
     id: null, kind: 'event', reminder_type: 'birthday', title: '', date: dayKey(start), start: timeKey(start), endDate: dayKey(end), end: timeKey(end),
-    all_day: false, repeat: 'none', location: '', notes: '', is_private: true, groups: [], detail: 'busy', alerts: [],
+    all_day: false, repeat: 'none', location: '', notes: '', is_private: true, groups: [], detail: 'full', alerts: [],
     groupEvent: null, invitees: [], ...over
   };
 }
@@ -799,31 +872,26 @@ function editorSheet() {
   const sw = (on) => `<span class="switch" aria-hidden="true"></span>`;
   const alertOpts = ALERTS[rem || d.all_day ? 'reminder' : 'event'];
   const shareRows = S.groups.map((g) => `
-    <button type="button" class="list-row c-${g.color}" data-action="draft-group" data-id="${g.id}" aria-pressed="${d.groups.includes(g.id)}">
-      <span class="avatar small" style="background:var(--evt-soft)" aria-hidden="true"><span class="dot"></span></span>
-      <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(g.name)}</span><span class="label muted">${g.members.length} people</span></span>${sw()}</button>`).join('');
-  const sharing = !grp ? `
+    <button type="button" class="list-row" data-action="draft-group" data-id="${g.id}" aria-pressed="${d.groups.includes(g.id)}">
+      ${groupPicHtml(g, 32)}
+      <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(g.name)}</span><span class="label muted">${g.members.length} ${g.members.length === 1 ? 'person' : 'people'}</span></span>${sw()}</button>`).join('');
+  const partnerRow = S.partner ? `<div class="list-row">${avatarHtml(S.partner, 'small', 'aria-hidden="true"')}<span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(S.partner.display_name)}, your partner</span><span class="label muted">Always sees ${rem ? 'your reminders' : 'full details'}</span></span>${icon('eye', 'sm')}</div>` : '';
+  const sharing = !grp ? (rem ? `
+    <section class="card list" aria-label="Who sees this reminder">
+      <div class="list-row" style="flex-direction:column;align-items:flex-start;gap:0"><span class="h2">Also show to</span><span class="label muted">Reminders are just for you unless you pick a group</span></div>
+      ${partnerRow}${shareRows || '<div class="list-row label muted">You have no groups yet.</div>'}
+    </section>` : `
     <section class="card list" aria-label="Who can see this">
-      <div class="list-row"><span class="h2 grow">Who can see this</span></div>
-      <button type="button" class="list-row" data-action="draft-private" aria-pressed="${d.is_private}">
-        <span class="avatar small" aria-hidden="true">${icon('lock', 'sm')}</span>
-        <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">Private</span><span class="label muted">Only you see this</span></span>${sw()}</button>
-      ${d.is_private ? '' : shareRows || '<div class="list-row label muted">You have no groups yet. Make one in the Groups tab.</div>'}
-    </section>
-    ${!d.is_private && d.groups.length && !rem ? `
-    <section class="card" aria-label="What they see">
-      <h2 class="h2">What they see</h2>
-      <div class="grid2">
-        <button type="button" class="option" data-action="draft-detail" data-v="full" aria-pressed="${d.detail === 'full'}">${icon('eye')}<span style="font-weight:600">Full details</span><span class="label muted">Title, time, place and notes</span></button>
-        <button type="button" class="option" data-action="draft-detail" data-v="busy" aria-pressed="${d.detail === 'busy'}">${icon('eyeOff')}<span style="font-weight:600">Busy only</span><span class="label muted">Just that you're not free</span></button>
-      </div>
-      <div class="chip ${d.detail === 'busy' ? 'busy' : 'c-tangerine'}" style="flex-direction:column;align-items:flex-start;gap:2px;cursor:default">
-        <span class="label muted" style="font-weight:500">How ${esc(listNames(d.groups.map((g) => S.groupsById[g]?.name).filter(Boolean)))} see${d.groups.length === 1 ? 's' : ''} it</span>
-        <span>${d.detail === 'busy' ? `${esc(S.me.display_name)} is busy` : esc(d.title || 'Your event')}</span>
-      </div>
-    </section>` : ''}
-    ${!d.is_private && d.groups.length && rem ? `<p class="note">${icon('eye', 'sm')} Everyone in ${esc(listNames(d.groups.map((g) => S.groupsById[g]?.name).filter(Boolean)))} will see this reminder on their calendar.</p>` : ''}
-    ${!d.is_private && !d.groups.length ? '<p class="note">Pick at least one group, or switch Private back on.</p>' : ''}` : '';
+      <div class="list-row">${icon('eyeOff', 'sm')}<span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">Everyone sees busy</span><span class="label muted">People in your groups see you're not free then</span></span></div>
+      ${partnerRow}
+      <div class="list-row" style="flex-direction:column;align-items:flex-start;gap:0"><span class="h2">Show the details to</span><span class="label muted">Title, time and place. Notes stay private.</span></div>
+      ${shareRows || '<div class="list-row label muted">You have no groups yet. Make one in the Groups tab.</div>'}
+    </section>`) : '';
+  const timeBox = (f) => {
+    const v = d[f] || '09:00', h = +v.slice(0, 2), pm = h >= 12;
+    return `<span class="time-box"><input class="inline-input time-text" name="${f}Text" value="${(h % 12 || 12)}:${v.slice(3, 5)}" inputmode="numbers" autocomplete="off" aria-label="${f === 'start' ? 'Start' : 'End'} time" style="width:4.2em;text-align:right">
+      <span class="ampm" role="group" aria-label="am or pm"><button type="button" data-action="draft-ampm" data-f="${f}" data-v="am" aria-pressed="${!pm}">am</button><button type="button" data-action="draft-ampm" data-f="${f}" data-v="pm" aria-pressed="${pm}">pm</button></span></span>`;
+  };
   const others = grp ? grp.members.filter((m) => m.id !== S.me.id) : [];
   const inviteBlock = grp && !d.id ? `
     <section class="card list" aria-label="Invite">
@@ -833,7 +901,7 @@ function editorSheet() {
         <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(m.display_name)}</span><span class="label muted">@${esc(m.username)}</span></span>
         <span class="check">${icon('check', 'sm')}</span></button>`).join('') : '<div class="list-row label muted">No one else is in this group yet.</div>'}
     </section>
-    <p class="note">${icon('eye', 'sm')} Guests see full details. Everyone else in ${esc(grp.name)} sees you as busy.</p>` : '';
+    <p class="note">${icon('eye', 'sm')} Guests see the title, time and place. Everyone else in your groups sees you as busy.</p>` : '';
   return `<form data-form="editor" style="display:contents" novalidate>
     <div class="sheet-head">
       <button type="button" class="btn btn-text" data-action="close" style="padding:0">Cancel</button>
@@ -851,17 +919,17 @@ function editorSheet() {
         <button type="button" class="list-row" data-action="draft-allday" aria-pressed="${d.all_day}"><span class="grow">All day</span>${sw()}</button>
         <div class="list-row"><span class="grow">Starts</span>
           <input class="inline-input" type="date" name="date" value="${d.date}" aria-label="Start date" required>
-          ${d.all_day ? '' : `<input class="inline-input" type="time" name="start" value="${d.start}" aria-label="Start time" required>`}</div>
+          ${d.all_day ? '' : timeBox('start')}</div>
         <div class="list-row"><span class="grow">Ends</span>
           <input class="inline-input" type="date" name="endDate" value="${d.endDate || d.date}" min="${d.date}" aria-label="End date" required>
-          ${d.all_day ? '' : `<input class="inline-input" type="time" name="end" value="${d.end}" aria-label="End time" required>`}</div>
+          ${d.all_day ? '' : timeBox('end')}</div>
         ${(() => { const r = draftRange(d); return r.e <= r.s ? `<div class="list-row label warn" role="alert">${icon('alert', 'sm')} It ends before it starts. Pick a later end.</div>` : ''; })()}`}
       <label class="list-row"><span class="grow">Repeat</span>
         <select class="inline-input" name="repeat" style="appearance:none;-webkit-appearance:none;font-weight:600">
           ${Object.entries(REPEAT_LABEL).map(([k, l]) => `<option value="${k}" ${d.repeat === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       ${rem ? '' : `<label class="list-row"><span class="grow" style="flex:none">Place</span><input class="inline-input grow" name="location" value="${esc(d.location)}" placeholder="Add a place" maxlength="200"></label>`}
     </div>
-    <div class="field"><label class="label" for="e-notes">Notes</label><textarea class="input" id="e-notes" name="notes" maxlength="2000" placeholder="Anything people should know">${esc(d.notes)}</textarea></div>
+    <div class="field"><label class="label" for="e-notes">${icon('lock', 'sm')} Notes · only you can see these</label><textarea class="input" id="e-notes" name="notes" maxlength="2000" placeholder="A small note for yourself">${esc(d.notes)}</textarea></div>
     ${inviteBlock}
     ${sharing}
     <section class="card list" aria-label="Remind me">
@@ -880,12 +948,12 @@ async function saveDraft() {
   if (isNaN(starts) || isNaN(ends)) { showToast('Pick a start and an end.', true); return; }
   if (ends <= starts) { showToast('It ends before it starts. Pick a later end.', true); return; }
   const grp = d.groupEvent;
-  const isPrivate = grp ? false : d.is_private || !d.groups.length;
+  const isPrivate = grp ? false : !d.groups.length;
   const row = {
     kind: d.kind, reminder_type: rem ? d.reminder_type : null, title: d.title.trim(),
     starts_at: starts.toISOString(), ends_at: ends.toISOString(), all_day: allDay,
     location: rem ? null : d.location.trim() || null, notes: d.notes.trim() || null,
-    is_private: isPrivate, detail: grp || rem ? 'full' : d.detail, repeat: d.repeat,
+    is_private: isPrivate, detail: 'full', repeat: d.repeat,
     alerts: d.alerts, group_id: grp || null
   };
   const shareTo = grp ? [grp] : isPrivate ? [] : d.groups;
@@ -924,22 +992,27 @@ function groupSheet() {
   const g = S.groupsById[sheet.id];
   if (!g) return '<p>That group is gone.</p>';
   const owner = g.owner_id === S.me.id;
-  return `<div class="sheet-grip"></div>
-    <div class="row c-${g.color}"><span class="dot" style="width:12px;height:12px"></span><h2 class="h-event grow">${esc(g.name)}</h2>
-      <button type="button" class="icon-btn plain" data-action="close" aria-label="Close">${icon('x')}</button></div>
-    ${owner ? `<div class="field"><span class="label">When you share an event with this group, start with</span>
-      <div class="seg" role="group"><button type="button" data-action="group-detail" data-v="full" aria-pressed="${g.default_detail === 'full'}">Full details</button>
-      <button type="button" data-action="group-detail" data-v="busy" aria-pressed="${g.default_detail === 'busy'}">Busy only</button></div></div>` : ''}
-    <section class="card list" aria-label="Members">
-      <div class="list-row"><span class="h2 grow">${g.members.length} ${g.members.length === 1 ? 'person' : 'people'}</span></div>
-      ${g.members.map((m) => `<div class="list-row"><span class="avatar small" aria-hidden="true">${initial(m.display_name)}</span>
+  const person = (m, waiting) => `<div class="list-row">${avatarHtml(m, 'small', 'aria-hidden="true"')}
         <span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(m.display_name)}${m.id === S.me.id ? ' (you)' : ''}${m.id === g.owner_id ? ' · manager' : ''}</span><span class="label muted">@${esc(m.username)}</span></span>
-        ${owner && m.id !== S.me.id ? `<button type="button" class="btn btn-text sm" data-action="remove-member" data-id="${m.id}" aria-label="Remove ${esc(m.display_name)}">Remove</button>` : ''}</div>`).join('')}
+        ${waiting ? '<span class="status waiting">Invited · waiting</span>' : ''}
+        ${owner && m.id !== S.me.id ? `<button type="button" class="btn btn-text sm" data-action="remove-member" data-id="${m.id}" aria-label="${waiting ? 'Cancel invite for' : 'Remove'} ${esc(m.display_name)}">${waiting ? 'Cancel' : 'Remove'}</button>` : ''}</div>`;
+  return `<div class="sheet-grip"></div>
+    <div class="row">
+      ${owner ? `<label class="gpic-edit" aria-label="Change group photo">${groupPicHtml(g, 64)}<span class="gpic-badge" aria-hidden="true">${icon('plus', 'sm')}</span>
+        <input type="file" accept="image/*" data-upload="group" data-id="${g.id}" hidden></label>` : groupPicHtml(g, 64)}
+      <div class="grow"><h2 class="h-event">${esc(g.name)}</h2><span class="label muted">${owner ? 'Tap the picture to change it' : 'Group'}</span></div>
+      <button type="button" class="icon-btn plain" data-action="close" aria-label="Close">${icon('x')}</button></div>
+    <section class="card list" aria-label="Members">
+      <div class="list-row"><span class="h2 grow">${g.members.length} ${g.members.length === 1 ? 'person' : 'people'}</span>${g.waiting.length ? `<span class="label muted">${g.waiting.length} waiting</span>` : ''}</div>
+      ${g.members.map((m) => person(m, false)).join('')}
+      ${g.waiting.map((m) => person(m, true)).join('')}
     </section>
     ${owner ? `<form data-form="add-member" class="field" novalidate>
-      <label class="label" for="m-user">Add people by username</label>
+      <label class="label" for="m-user">Invite people by username</label>
       <div class="row"><input class="input grow" id="m-user" name="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="@username" style="border-radius:999px;height:48px">
-      <button type="submit" class="btn btn-outline">Add</button></div></form>` : ''}
+      <button type="submit" class="btn btn-outline">Invite</button></div>
+      <span class="label muted">They join once they say yes.</span></form>` : ''}
+    <p class="note">${icon('eyeOff', 'sm')} Everyone here sees when you're busy. They see what you're doing only for events you show to ${esc(g.name)}.</p>
     <div class="row">
       <button type="button" class="btn btn-outline grow" data-action="group-find">${icon('clock')} Find a time</button>
       ${owner ? '<button type="button" class="btn btn-danger" data-action="delete-group">Delete group</button>' : '<button type="button" class="btn btn-danger" data-action="leave-group">Leave</button>'}
@@ -954,22 +1027,37 @@ function newGroupSheet() {
       <input class="input" id="g-name" name="name" value="${esc(d.name)}" maxlength="40" required placeholder="Office, Family, Friends…"></div>
     <div class="field"><span class="label">Colour</span>
       <div class="row wrap">${COLORS.map((c) => `<button type="button" class="pill c-${c}" data-action="ng-color" data-v="${c}" aria-pressed="${d.color === c}"><span class="dot"></span>${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div></div>
-    <div class="field"><span class="label">When you share an event with this group, start with</span>
-      <div class="seg" role="group"><button type="button" data-action="ng-detail" data-v="full" aria-pressed="${d.detail === 'full'}">Full details</button>
-      <button type="button" data-action="ng-detail" data-v="busy" aria-pressed="${d.detail === 'busy'}">Busy only</button></div></div>
-    <p class="note">You can add people right after you create it.</p>
+    <p class="note">You can invite people and add a picture right after you create it.</p>
   </form>`;
 }
 function meSheet() {
+  const P = S.partner, W = S.partnerPending;
+  const partner = P
+    ? `<div class="list-row">${avatarHtml(P, 'small', 'aria-hidden="true"')}<span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(P.display_name)}</span><span class="label muted">@${esc(P.username)} · sees your whole calendar</span></span>
+        <button type="button" class="btn btn-text sm" data-action="partner-remove">Remove</button></div>`
+    : W
+      ? `<div class="list-row">${avatarHtml(W, 'small', 'aria-hidden="true"')}<span class="grow" style="display:flex;flex-direction:column"><span style="font-weight:600">${esc(W.display_name)}</span><span class="label muted">Waiting for them to accept</span></span>
+          <button type="button" class="btn btn-text sm" data-action="partner-remove">Cancel</button></div>`
+      : `<form data-form="partner" class="list-row" novalidate style="gap:8px">
+          <input class="input grow" name="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="@username" aria-label="Partner's username" style="border-radius:999px;height:44px">
+          <button type="submit" class="btn btn-outline sm">Ask</button></form>`;
   return `<div class="sheet-grip"></div>
-    <div class="row"><span class="avatar" aria-hidden="true">${initial(S.me.display_name)}</span>
-      <div class="grow"><h2 class="h-event">${esc(S.me.display_name)}</h2><span class="label muted">@${esc(S.me.username)}${S.session?.user?.email && !S.session.user.email.endsWith('@' + USERNAME_EMAIL_DOMAIN) ? ' · ' + esc(S.session.user.email) : ''}</span></div>
+    <div class="row">
+      <label class="gpic-edit" aria-label="Change your photo">${avatarHtml(S.me, 'big', 'aria-hidden="true"')}<span class="gpic-badge" aria-hidden="true">${icon('plus', 'sm')}</span>
+        <input type="file" accept="image/*" data-upload="avatar" hidden></label>
+      <div class="grow"><h2 class="h-event">${esc(S.me.display_name)}</h2><span class="label muted">@${esc(S.me.username)}${S.session?.user?.email && !S.session.user.email.endsWith('@' + USERNAME_EMAIL_DOMAIN) ? ' · ' + esc(S.session.user.email) : ''}</span>
+        <span class="label muted" style="display:block">Tap your picture to change it</span></div>
       <button type="button" class="icon-btn plain" data-action="close" aria-label="Close">${icon('x')}</button></div>
     <form data-form="profile" class="field" novalidate>
       <label class="label" for="p-name">Your name</label>
       <div class="row"><input class="input grow" id="p-name" name="name" value="${esc(S.me.display_name)}" maxlength="40" required>
       <button type="submit" class="btn btn-outline">Save</button></div>
     </form>
+    <section class="card list" aria-label="Partner">
+      <div class="list-row" style="flex-direction:column;align-items:flex-start;gap:0"><span class="h2">Partner</span>
+        <span class="label muted">One person who sees your whole calendar with every detail, and you see theirs. They have to accept.</span></div>
+      ${partner}
+    </section>
     ${notifCard()}
     ${isStandalone() ? '' : `<div class="card"><span class="h2">Put Huddle on your Home Screen</span>
       <span class="label muted">In Safari, tap the Share button, then “Add to Home Screen”. Huddle then opens like an app.</span></div>`}
@@ -1101,14 +1189,18 @@ const actions = {
     if (!d.all_day) { const r = draftRange(d); if (r.e <= r.s) { const e = new Date(r.s.getTime() + HOUR); d.endDate = dayKey(e); d.end = timeKey(e); } }
     renderSheet();
   },
-  'draft-private': () => { const d = sheet.draft; d.is_private = !d.is_private; renderSheet(); },
+  'draft-ampm': (el) => {
+    const d = sheet.draft, f = el.dataset.f, [h, m] = (d[f] || '09:00').split(':').map(Number);
+    const nh = el.dataset.v === 'pm' ? (h % 12) + 12 : h % 12;
+    if (nh !== h) setDraftTime(f, `${pad(nh)}:${pad(m)}`);
+    renderSheet();
+  },
   'draft-group': (el) => {
     const d = sheet.draft, id = el.dataset.id;
     if (d.groups.includes(id)) d.groups = d.groups.filter((g) => g !== id);
-    else { if (!d.groups.length) d.detail = S.groupsById[id]?.default_detail || 'busy'; d.groups.push(id); }
+    else d.groups.push(id);
     renderSheet();
   },
-  'draft-detail': (el) => { sheet.draft.detail = el.dataset.v; renderSheet(); },
   'draft-alert': (el) => { const d = sheet.draft, v = +el.dataset.v; d.alerts = d.alerts.includes(v) ? d.alerts.filter((a) => a !== v) : [...d.alerts, v].sort((a, b) => a - b); renderSheet(); },
   'draft-invitee': (el) => { const d = sheet.draft, id = el.dataset.id; d.invitees = d.invitees.includes(id) ? d.invitees.filter((x) => x !== id) : [...d.invitees, id]; renderSheet(); },
   'edit-event': () => { const ev = sheet.ev; openSheet({ type: 'editor', label: 'Edit', draft: draftFromEvent(ev) }); },
@@ -1133,20 +1225,15 @@ const actions = {
   'new-group': () => {
     const used = new Set(S.groups.map((g) => g.color));
     const color = ['blush', 'cobalt', 'olive', 'sun', 'tangerine', 'slate'].find((c) => !used.has(c)) || 'blush';
-    openSheet({ type: 'new-group', label: 'New group', draft: { name: '', color, detail: 'busy' }, focus: '#g-name' });
+    openSheet({ type: 'new-group', label: 'New group', draft: { name: '', color }, focus: '#g-name' });
   },
   'dismiss-alert': (el) => { const d = store.get('dismissed', []); d.push(el.dataset.key); store.set('dismissed', d.slice(-300)); render(); },
   'ng-color': (el) => { sheet.draft.color = el.dataset.v; renderSheet(); },
-  'ng-detail': (el) => { sheet.draft.detail = el.dataset.v; renderSheet(); },
   'open-group': (el) => openSheet({ type: 'group', label: 'Group', id: el.dataset.id }),
-  'group-detail': async (el) => {
-    const { error } = await sb.from('groups').update({ default_detail: el.dataset.v }).eq('id', sheet.id);
-    if (error) { showToast(niceError(error), true); return; }
-    S.groupsById[sheet.id].default_detail = el.dataset.v; renderSheet();
-  },
   'remove-member': async (el) => {
-    const g = S.groupsById[sheet.id], m = g.members.find((x) => x.id === el.dataset.id);
-    if (!confirm(`Remove ${m?.display_name} from ${g.name}?`)) return;
+    const g = S.groupsById[sheet.id], m = [...g.members, ...g.waiting].find((x) => x.id === el.dataset.id);
+    const waiting = g.waiting.includes(m);
+    if (!confirm(waiting ? `Cancel the invite for ${m?.display_name}?` : `Remove ${m?.display_name} from ${g.name}?`)) return;
     const { error } = await sb.from('group_members').delete().eq('group_id', g.id).eq('user_id', el.dataset.id);
     if (error) { showToast(niceError(error), true); return; }
     await refresh(['groups', 'events']);
@@ -1164,6 +1251,29 @@ const actions = {
     const { error } = await sb.from('group_members').delete().eq('group_id', g.id).eq('user_id', S.me.id);
     if (error) { showToast(niceError(error), true); return; }
     closeSheet(); showToast(`You left ${g.name}`); refresh(['groups', 'events']);
+  },
+  'group-reply': async (el) => {
+    const yes = el.dataset.v === '1', r = S.requests.groups.find((x) => x.group_id === el.dataset.id);
+    const { error } = await sb.rpc('respond_group_invite', { p_group: el.dataset.id, p_accept: yes });
+    if (error) { showToast(niceError(error), true); return; }
+    if (yes) { S.enabled.add(el.dataset.id); store.set('enabled', [...S.enabled]); }
+    showToast(yes ? `You joined ${r?.groups?.name || 'the group'}` : 'Invite declined');
+    await refresh(['groups', 'events', 'invites']);
+  },
+  'partner-reply': async (el) => {
+    const yes = el.dataset.v === '1';
+    const { error } = await sb.rpc('respond_partner', { p_id: el.dataset.id, p_accept: yes });
+    if (error) { showToast(niceError(error), true); return; }
+    showToast(yes ? "You're partners now. You can see each other's calendar." : 'Request declined');
+    await refresh(['events', 'invites']);
+  },
+  'partner-remove': async () => {
+    const P = S.partner;
+    if (!confirm(P ? `Stop being partners with ${P.display_name}? You'll both stop seeing each other's whole calendar.` : 'Cancel your partner request?')) return;
+    const { error } = await sb.rpc('remove_partner');
+    if (error) { showToast(niceError(error), true); return; }
+    showToast(P ? 'Partner removed' : 'Request cancelled');
+    await refresh(['events', 'invites']);
   },
   'group-find': () => { S.find.groupId = sheet.id; S.find.sel = null; closeSheet(); S.tab = 'find'; render(); },
   // find a time
@@ -1198,22 +1308,44 @@ document.addEventListener('click', (e) => {
   fn(el, e);
 });
 document.addEventListener('input', (e) => {
-  if (sheet?.type === 'editor' && e.target.name && !TIME_FIELDS.includes(e.target.name) && e.target.closest('[data-form="editor"]')) sheet.draft[e.target.name] = e.target.value;
+  if (sheet?.type === 'editor' && e.target.name && !TIME_FIELDS.includes(e.target.name) && !/Text$/.test(e.target.name) && e.target.closest('[data-form="editor"]')) sheet.draft[e.target.name] = e.target.value;
   if (sheet?.type === 'new-group' && e.target.name === 'name') sheet.draft.name = e.target.value;
 });
-document.addEventListener('change', (e) => {
-  if (sheet?.type !== 'editor' || !e.target.name) return;
-  const d = sheet.draft, name = e.target.name;
-  if (!TIME_FIELDS.includes(name)) { d[name] = e.target.value; return; }
-  if (!e.target.value) return;
-  const before = draftRange(d);
-  d[name] = e.target.value;
+// Reads a typed time: 930, 9:30, 9.30, 3pm, 15:30. Without am/pm, keeps the am/pm already chosen.
+function parseTime(raw, wasPm) {
+  const m = String(raw || '').trim().toLowerCase().replace(/\s+/g, '').match(/^(\d{1,2})(?:[:.h]?(\d{2}))?(a|am|p|pm)?$/);
+  if (!m) return null;
+  let h = +m[1]; const min = +(m[2] || 0);
+  if (min > 59 || h > 23) return null;
+  if (m[3]) { if (h < 1 || h > 12) return null; h = m[3].startsWith('p') ? (h % 12) + 12 : h % 12; }
+  else if (h >= 1 && h <= 12) h = wasPm ? (h % 12) + 12 : h % 12;
+  return `${pad(h)}:${pad(min)}`;
+}
+// Changing the start moves the end too, keeping the same length.
+function setDraftTime(name, value) {
+  const d = sheet.draft, before = draftRange(d);
+  d[name] = value;
   if ((name === 'date' || name === 'start') && d.kind !== 'reminder') {
-    // Moving the start moves the end too, keeping the same length.
     const ns = draftRange(d).s;
     if (d.all_day) d.endDate = dayKey(addDays(ns, Math.max(1, Math.round((before.e - before.s) / (24 * HOUR))) - 1));
-    else { const ne = new Date(ns.getTime() + Math.max(15 * 60000, before.e - before.s || HOUR)); d.endDate = dayKey(ne); d.end = timeKey(ne); }
+    else { const ne = new Date(ns.getTime() + Math.max(5 * 60000, before.e - before.s || HOUR)); d.endDate = dayKey(ne); d.end = timeKey(ne); }
   }
+}
+function readTypedTime(input) {
+  const f = input.name.replace(/Text$/, ''), d = sheet.draft;
+  const t = parseTime(input.value, +(d[f] || '00').slice(0, 2) >= 12);
+  if (!t) { showToast('Type a time like 9:30, 930 or 3pm.', true); return false; }
+  if (t !== d[f]) setDraftTime(f, t);
+  return true;
+}
+document.addEventListener('change', (e) => {
+  if (e.target.matches?.('input[data-upload]')) { uploadPhoto(e.target); return; }
+  if (sheet?.type !== 'editor' || !e.target.name) return;
+  const d = sheet.draft, name = e.target.name;
+  if (/^(start|end)Text$/.test(name)) { readTypedTime(e.target); renderSheet(); return; }
+  if (!TIME_FIELDS.includes(name)) { d[name] = e.target.value; return; }
+  if (!e.target.value) return;
+  setDraftTime(name, e.target.value);
   renderSheet();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (drag.active) cancelDrag(); else if (sheet) closeSheet(); } });
@@ -1256,6 +1388,7 @@ document.addEventListener('click', (e) => { if (drag.suppress) { drag.suppress =
 
 function startDrag() {
   drag.active = true;
+  cancelSwipe();
   const g = drag.el.cloneNode(true);
   g.removeAttribute('data-action'); g.removeAttribute('data-drag');
   g.classList.add('drag-ghost');
@@ -1278,8 +1411,8 @@ function dropTarget(x, y) {
     const d = fromKey(col.dataset.col);
     if (ev.all_day) return { node: col, start: d, end: new Date(d.getTime() + dur) };
     const r = col.getBoundingClientRect();
-    let mins = Math.round((((y - drag.offY) - r.top) / 48) * 60 / 15) * 15;
-    mins = Math.max(0, Math.min(24 * 60 - 15, mins));
+    let mins = Math.round((((y - drag.offY) - r.top) / 48) * 60 / 5) * 5;
+    mins = Math.max(0, Math.min(24 * 60 - 5, mins));
     const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, mins);
     return { node: col, start, end: new Date(start.getTime() + dur) };
   }
@@ -1342,10 +1475,15 @@ document.addEventListener('submit', async (e) => {
   if (btn) btn.disabled = true;
   try {
     if (form.dataset.form === 'auth') await submitAuth(f);
-    else if (form.dataset.form === 'editor') { for (const k of TIME_FIELDS) if (f[k]) sheet.draft[k] = f[k]; if (!sheet.saving) await saveDraft(); }
+    else if (form.dataset.form === 'editor') {
+      for (const k of ['date', 'endDate']) if (f[k]) sheet.draft[k] = f[k];
+      for (const inp of form.querySelectorAll('.time-text')) if (!readTypedTime(inp)) return;
+      if (!sheet.saving) await saveDraft();
+    }
     else if (form.dataset.form === 'new-group') await createGroup();
     else if (form.dataset.form === 'add-member') await addMember(f.username);
     else if (form.dataset.form === 'profile') await saveProfile(f.name);
+    else if (form.dataset.form === 'partner') await askPartner(f.username);
   } finally { if (btn && btn.isConnected) btn.disabled = false; }
 });
 
@@ -1398,20 +1536,21 @@ async function submitAuth(f) {
 async function createGroup() {
   const d = sheet.draft;
   if (!d.name.trim()) { showToast('Give the group a name.', true); return; }
-  const { data, error } = await sb.from('groups').insert({ name: d.name.trim(), color: d.color, default_detail: d.detail, owner_id: S.me.id }).select('id').single();
+  const { data, error } = await sb.from('groups').insert({ name: d.name.trim(), color: d.color, owner_id: S.me.id }).select('id').single();
   if (error) { showToast(niceError(error), true); return; }
   await loadGroups();
   S.enabled.add(data.id); store.set('enabled', [...S.enabled]);
   render();
   openSheet({ type: 'group', label: 'Group', id: data.id, focus: '#m-user' });
-  showToast(`${d.name.trim()} created. Now add people.`);
+  showToast(`${d.name.trim()} created. Now invite people.`);
 }
 async function addMember(raw) {
   const username = String(raw || '').trim().toLowerCase().replace(/^@/, '');
   if (!username) return;
   const { error } = await sb.rpc('add_member_by_username', { p_group: sheet.id, p_username: username });
   if (error) { showToast(/No one has/.test(error.message) ? `No one has the username @${username}.` : niceError(error), true); return; }
-  showToast(`Added @${username}`);
+  showToast(`Invite sent to @${username}`);
+  kickNotify();
   sheet.focus = '#m-user';
   await refresh(['groups', 'events']);
 }
@@ -1421,6 +1560,116 @@ async function saveProfile(name) {
   const { error } = await sb.from('profiles').update({ display_name: name }).eq('id', S.me.id);
   if (error) { showToast(niceError(error), true); return; }
   S.me.display_name = name; showToast('Saved'); render();
+}
+
+async function askPartner(raw) {
+  const username = String(raw || '').trim().toLowerCase().replace(/^@/, '');
+  if (!username) return;
+  const { data, error } = await sb.rpc('request_partner', { p_username: username });
+  if (error) { showToast(/No one has/.test(error.message) ? `No one has the username @${username}.` : niceError(error), true); return; }
+  if (data === 'active') showToast(`You and @${username} are partners now`);
+  else { showToast(`Asked @${username}. They need to accept.`); kickNotify(); }
+  await refresh(['events', 'invites']);
+}
+
+// ---------------------------------------------------------------- photos
+// Shrinks the picture to a 400px square and uploads it to your folder in Supabase Storage.
+async function squareJpeg(file, size = 400) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("That picture couldn't be opened. Try a JPEG or PNG.")); i.src = url; });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const c = document.createElement('canvas'); c.width = c.height = size;
+    c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    return await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.85));
+  } finally { URL.revokeObjectURL(url); }
+}
+async function uploadPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  showToast('Uploading…');
+  try {
+    const blob = await squareJpeg(file);
+    const kind = input.dataset.upload, gid = input.dataset.id;
+    const path = `${S.me.id}/${kind === 'group' ? 'group-' + gid : 'avatar'}-${Date.now()}.jpg`;
+    const { error } = await sb.storage.from('photos').upload(path, blob, { contentType: 'image/jpeg', upsert: true });
+    if (error) throw error;
+    const url = sb.storage.from('photos').getPublicUrl(path).data.publicUrl;
+    const q = kind === 'group' ? sb.from('groups').update({ photo_url: url }).eq('id', gid) : sb.from('profiles').update({ avatar_url: url }).eq('id', S.me.id);
+    const { error: e2 } = await q;
+    if (e2) throw e2;
+    if (kind === 'group') await loadGroups(); else S.me.avatar_url = url;
+    showToast('Picture updated'); render(); renderSheet();
+  } catch (e) { showToast(/Bucket not found|row-level/i.test(e?.message || '') ? 'Photos aren\'t set up yet. Run update-1.sql in Supabase (see README).' : niceError(e), true); }
+}
+
+// ---------------------------------------------------------------- swipes
+// Day and week: swipe left for next, right for previous.
+// Month and year: swipe up for next, down for previous.
+const sw = { area: null, axis: null, x0: 0, y0: 0, d: 0, hint: null };
+function cancelSwipe() {
+  if (sw.area) sw.area.style.transform = '';
+  sw.hint?.remove();
+  Object.assign(sw, { area: null, axis: null, d: 0, hint: null });
+}
+const pageAtTop = () => (document.scrollingElement || document.documentElement).scrollTop <= 1;
+const pageAtBottom = () => { const el = document.scrollingElement || document.documentElement; return el.scrollTop + window.innerHeight >= el.scrollHeight - 2; };
+document.addEventListener('touchstart', (e) => {
+  if (sheet || e.touches.length !== 1) { cancelSwipe(); return; }
+  const t = e.touches[0], area = e.target.closest?.('.swipe-area[data-swipe]');
+  sw.x0 = t.clientX; sw.y0 = t.clientY; sw.axis = null; sw.d = 0;
+  sw.area = area || null; sw.want = area?.dataset.swipe || null;
+  pull.on = !area?.matches('[data-swipe="y"]') && pageAtTop() && !(e.target.closest?.('.timeline-wrap')?.scrollTop > 0);
+  pull.d = 0;
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (drag.active || e.touches.length !== 1) return;
+  const t = e.touches[0], dx = t.clientX - sw.x0, dy = t.clientY - sw.y0;
+  if (!sw.axis && Math.hypot(dx, dy) > 12) sw.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+  if (!sw.axis) return;
+  // Pull down to refresh
+  if (pull.on && sw.axis === 'y' && dy > 0) { pull.d = dy; showPull(dy); }
+  if (!sw.area || sw.axis !== sw.want) return;
+  let d = sw.axis === 'x' ? dx : dy;
+  if (sw.axis === 'y' && ((d < 0 && !pageAtBottom()) || (d > 0 && !pageAtTop()))) { d = 0; }
+  if (drag.el) { clearTimeout(drag.timer); drag.el = null; }
+  sw.d = d;
+  if (sw.axis === 'y' && d && e.cancelable) e.preventDefault();
+  sw.area.style.transform = sw.axis === 'x' ? `translateX(${d * 0.5}px)` : `translateY(${d * 0.4}px)`;
+  const next = d < 0, unit = { day: 'day', week: 'week', month: 'month', year: 'year' }[S.view];
+  if (Math.abs(d) > 20) {
+    if (!sw.hint) { sw.hint = document.createElement('div'); sw.hint.className = 'swipe-hint'; document.body.appendChild(sw.hint); }
+    sw.hint.textContent = `${Math.abs(d) >= 60 ? 'Let go for' : ''} ${next ? 'next' : 'previous'} ${unit}`.trim().replace(/^./, (c) => c.toUpperCase());
+    sw.hint.classList.toggle('ready', Math.abs(d) >= 60);
+  } else if (sw.hint) { sw.hint.remove(); sw.hint = null; }
+}, { passive: false });
+document.addEventListener('touchend', () => {
+  const d = sw.d, had = sw.area && sw.axis === sw.want;
+  cancelSwipe();
+  if (pull.on) { const ok = pull.d >= 70; hidePull(ok); pull.on = false; if (ok) doPullRefresh(); }
+  if (had && Math.abs(d) >= 60 && !drag.active) go(() => step(d < 0 ? 1 : -1));
+});
+document.addEventListener('touchcancel', () => { cancelSwipe(); if (pull.on) { hidePull(false); pull.on = false; } });
+
+// ---------------------------------------------------------------- pull to refresh
+const pull = { on: false, d: 0, el: null };
+function showPull(d) {
+  if (!pull.el) { pull.el = document.createElement('div'); pull.el.className = 'pull'; pull.el.innerHTML = `${icon('repeat', 'sm')}<span></span>`; document.body.appendChild(pull.el); }
+  const h = Math.min(d * 0.5, 64);
+  pull.el.style.transform = `translate(-50%, ${h - 48}px) rotate(${d * 2}deg)`;
+  pull.el.style.opacity = String(Math.min(1, d / 70));
+  pull.el.classList.toggle('ready', d >= 70);
+}
+function hidePull(keep) {
+  if (!pull.el) return;
+  if (keep) { pull.el.classList.add('spin'); pull.el.style.transform = 'translate(-50%, 16px)'; return; }
+  pull.el.remove(); pull.el = null;
+}
+async function doPullRefresh() {
+  if (!S.ready) { hidePull(false); return; }
+  await refresh(['groups', 'events', 'invites']);
+  hidePull(false);
+  showToast('Up to date');
 }
 
 let resizeTimer, lastWide = window.innerWidth >= 900;

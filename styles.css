@@ -274,3 +274,46 @@ body.dragging, body.dragging * { cursor: grabbing !important; }
   .mcell { height: 112px; }
   .timeline-wrap { max-height: calc(100dvh - 280px); }
 }
+
+/* ================= Update 1: photos, partner, month titles, swipes, pull to refresh ================= */
+.avatar.photo, .gpic { overflow: hidden; padding: 0; }
+.avatar.photo img, .gpic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar.big { width: 72px; height: 72px; font-size: 28px; }
+.gpic { display: inline-flex; align-items: center; justify-content: center; flex: none; background: var(--evt-soft); color: var(--ink); font-family: var(--display); font-weight: 600; }
+.gpic-edit { position: relative; display: inline-flex; cursor: pointer; flex: none; }
+.gpic-badge { position: absolute; right: -4px; bottom: -4px; width: 26px; height: 26px; border-radius: 999px; background: var(--ink); color: var(--surface); display: flex; align-items: center; justify-content: center; border: 2px solid var(--raised, #fff); }
+.gpic-edit:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 999px; }
+
+/* Month: titles in each day, grid fills the screen */
+.month-wrap { display: flex; flex-direction: column; gap: 4px; will-change: transform; transition: transform .18s ease-out; }
+.month-cells { grid-auto-rows: max(64px, calc((100dvh - 340px) / var(--rows))); }
+.month-cells .mcell { height: auto; min-height: 0; align-items: stretch; padding: 4px 3px; gap: 2px; overflow: hidden; border-radius: 12px; }
+.month-cells .mcell .n { align-self: center; height: 20px; min-width: 22px; font-size: 12px; }
+.month-cells .mlist { display: flex; }
+.month-cells .mlist i { font-size: 10px; line-height: 14px; padding: 0 3px; border-radius: 3px; }
+.month-cells .mlist i.pending { background: transparent; outline: 1px dashed var(--evt); outline-offset: -1px; }
+.month-cells .mcell.out .mlist { opacity: .55; }
+@media (min-width: 700px) {
+  .month-cells .mcell { padding: 6px; gap: 3px; height: auto; }
+  .month-cells .mcell .n { align-self: flex-start; }
+  .month-cells .mlist i { font-size: 12px; line-height: 16px; }
+}
+
+/* Swipes */
+.swipe-area { transition: transform .18s ease-out; }
+.timeline-wrap.swipe-area { touch-action: pan-y; }
+.swipe-hint { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 12px); transform: translateX(-50%); z-index: 60; background: var(--raised, #fff); color: var(--ink); border-radius: 999px; padding: 8px 16px; font-weight: 600; font-size: 14px; box-shadow: 0 4px 16px rgba(29,27,31,.14); pointer-events: none; }
+.swipe-hint.ready { background: var(--ink); color: var(--surface); }
+
+/* Pull to refresh */
+.pull { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 8px); z-index: 60; width: 40px; height: 40px; border-radius: 999px; background: var(--raised, #fff); box-shadow: 0 4px 16px rgba(29,27,31,.14); display: flex; align-items: center; justify-content: center; color: var(--muted); pointer-events: none; transform: translate(-50%, -48px); }
+.pull.ready { color: var(--brand); }
+.pull.spin svg { animation: pullspin .8s linear infinite; color: var(--brand); }
+@keyframes pullspin { to { transform: rotate(360deg); } }
+
+/* Typed times */
+.time-box { display: inline-flex; align-items: center; gap: 6px; }
+.ampm { display: inline-flex; background: var(--sunken); border-radius: 999px; padding: 2px; }
+.ampm button { border: 0; background: transparent; border-radius: 999px; height: 32px; min-width: 40px; font: inherit; font-size: 13px; font-weight: 600; color: var(--muted); }
+.ampm button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.status.waiting { white-space: nowrap; }
